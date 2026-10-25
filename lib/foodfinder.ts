@@ -11,7 +11,7 @@ export type RoomData = {
     members: string[];
     budget: number;
     restaurants: Restaurant[];
-    votes: Record<string, string>;
+    votes: Record<string, string[]>;
 };
 
 export function getRoom(roomId: string): RoomData {
