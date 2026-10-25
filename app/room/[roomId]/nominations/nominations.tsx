@@ -13,11 +13,21 @@ export default function Nominations({ roomId }: { roomId: string }) {
     const [location, setLocation] = useState("");
     const [website, setWebsite] = useState("");
 
+    // placeholder for group readiness until backend is implemented
+    const [waiting, setWaiting] = useState(false);
+    const [canMoveToVoting, setCanMoveToVoting] = useState(false);
+
     useEffect(() => {
         setRoom(getRoom(roomId));
         setCurrentMember(getMember(roomId));
         setLoaded(true);
     }, [roomId]);
+
+    useEffect(() => {
+        if (canMoveToVoting) {
+            router.push(`/room/${roomId}/vote`);
+        }
+    }, [canMoveToVoting, roomId, router]);
 
     function updateRoom(next: RoomData) {
         setRoom(next);
@@ -49,7 +59,19 @@ export default function Nominations({ roomId }: { roomId: string }) {
     const eligible = room.restaurants.filter((r) => r.price <= room.budget);
     const excluded = room.restaurants.filter((r) => r.price > room.budget);
 
-    if (!loaded) return <main className="min-h-screen bg-[#F0EADF] p-10">Loading...</main>;
+    function markReady() {
+        if (!member || eligible.length === 0) return;
+
+        setWaiting(true);
+        setCanMoveToVoting(true); // used so can test the voting page before backend implementation
+    }
+
+    if (!loaded) { return (
+            <main className="min-h-screen bg-[#F0EADF] p-10">
+                Loading...
+            </main>
+        );
+    }
 
     return (
         <main className="min-h-screen bg-[#A99B82] px-4 py-6 text-[#343329] sm:px-10 sm:py-10">
@@ -86,16 +108,46 @@ export default function Nominations({ roomId }: { roomId: string }) {
                         <p className="mt-3 text-sm text-[#68665A]"> Nominating as {member || "Guest"}. </p>
 
                         <div className="mt-6 space-y-3">
-                            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Restaurant name" className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"/>
-                            <input type="number" min="1" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="Estimated price per person ($)" className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"/>
-                            <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Neighborhood or address" className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"/>
-                            <input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="Website URL (optional)" className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"/>
+                            <input
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                placeholder="Restaurant name"
+                                className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"
+                            />
+
+                            <input
+                                type="number"
+                                min="1"
+                                value={price}
+                                onChange={(e) => setPrice(e.target.value)}
+                                placeholder="Estimated price per person ($)"
+                                className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"
+                            />
+
+                            <input
+                                value={location}
+                                onChange={(e) => setLocation(e.target.value)}
+                                placeholder="Neighborhood or address"
+                                className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"
+                            />
+
+                            <input
+                                value={website}
+                                onChange={(e) => setWebsite(e.target.value)}
+                                placeholder="Website URL (optional)"
+                                className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"
+                            />
                         </div>
 
                         <button onClick={addRestaurant} disabled={!member || !name.trim() || Number(price) <= 0} className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
                             Add Nomination +
                         </button>
-                        {!member && <p className="mt-3 text-xs text-[#9C5A49]">Join the group room before nominating.</p>}
+
+                        {!member && (
+                            <p className="mt-3 text-xs text-[#9C5A49]">
+                                Join the group room before nominating.
+                            </p>
+                        )}
                     </div>
                 </section>
 
@@ -105,7 +157,11 @@ export default function Nominations({ roomId }: { roomId: string }) {
                         <h2 className="mt-4 font-serif text-4xl"> The contenders. </h2>
                         <p className="mt-3 text-sm text-[#68665A]">{eligible.length} within budget · {excluded.length} excluded</p>
 
-                        {room.restaurants.length === 0 && <p className="mt-8 text-sm italic text-[#777466]"> No restaurants nominated yet. </p>}
+                        {room.restaurants.length === 0 && (
+                            <p className="mt-8 text-sm italic text-[#777466]">
+                                No restaurants nominated yet.
+                            </p>
+                        )}
 
                         <div className="mt-8 grid gap-5 md:grid-cols-2">
                             {room.restaurants.map((restaurant) => (
@@ -120,8 +176,23 @@ export default function Nominations({ roomId }: { roomId: string }) {
                                         {restaurant.price <= room.budget ? "✓ Within budget" : "Over budget · Excluded"}
                                     </p>
                                     <div className="mt-5 flex gap-5">
-                                        {/^https?:\/\//i.test(restaurant.website) && <a href={restaurant.website} target="_blank" rel="noopener noreferrer" className="text-xs underline">Website</a>}
-                                        <button onClick={() => removeRestaurant(restaurant.id)} className="text-xs underline">Remove</button>
+                                        {/^https?:\/\//i.test(restaurant.website) && (
+                                            <a
+                                                href={restaurant.website}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-xs underline"
+                                            >
+                                                Website
+                                            </a>
+                                        )}
+
+                                        <button
+                                            onClick={() => removeRestaurant(restaurant.id)}
+                                            className="text-xs underline"
+                                        >
+                                            Remove
+                                        </button>
                                     </div>
                                 </div>
                             ))}
@@ -130,11 +201,31 @@ export default function Nominations({ roomId }: { roomId: string }) {
                 </section>
 
                 <section className="relative z-10 px-8 pb-24 text-center">
-                    <h2 className="font-serif text-5xl"> Ready to decide? </h2>
-                    <p className="mt-4 text-sm text-[#68665A]"> Time to let everyone have their say. </p>
-                    <button onClick={() => router.push(`/room/${roomId}/vote`)} disabled={eligible.length === 0 || !member} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
-                        Continue to Voting →
-                    </button>
+                    <h2 className="font-serif text-5xl"> {waiting ? "Waiting for your group." : "Ready to decide?"} </h2>
+                    <p className="mt-4 text-sm text-[#68665A]">
+                        {waiting
+                            ? "You're ready! Waiting for everyone else."
+                            : "Time to let everyone have their say."}
+                    </p>
+                    {!waiting ? (
+                        <button
+                            onClick={markReady}
+                            disabled={eligible.length === 0 || !member}
+                            className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
+                        >
+                            Ready to Vote →
+                        </button>
+                    ) : (
+                        <div className="mt-8">
+                            <p className="font-serif text-2xl text-[#566B48]">
+                                You're ready to vote!
+                            </p>
+
+                            <p className="mt-4 text-xs text-[#777466]">
+                                Voting opens when everyone is ready.
+                            </p>
+                        </div>
+                    )}
                 </section>
 
                 <footer className="relative z-10 flex justify-between border-t border-[#343329]/15 px-6 py-6 text-[10px] uppercase tracking-[0.15em] text-[#777466] sm:px-12">

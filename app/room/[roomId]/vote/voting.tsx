@@ -7,7 +7,7 @@ export default function Voting({ roomId }: { roomId: string }) {
     const router = useRouter();
     const [room, setRoom] = useState<RoomData>({ members: [], budget: 30, restaurants: [], votes: {} });
     const [member, setCurrentMember] = useState("");
-    const [selected, setSelected] = useState("");
+    const [selected, setSelected] = useState<string[]>([]);
     const [loaded, setLoaded] = useState(false);
 
     useEffect(() => {
@@ -15,12 +15,19 @@ export default function Voting({ roomId }: { roomId: string }) {
         const currentMember = getMember(roomId);
         setRoom(data);
         setCurrentMember(currentMember);
-        setSelected(data.votes[currentMember] || "");
+        const previousVote = data.votes[currentMember];
+        setSelected(Array.isArray(previousVote) ? previousVote : previousVote ? [previousVote] : []);
         setLoaded(true);
     }, [roomId]);
 
+    function toggleRestaurant(id: string) {
+        setSelected((previous) => previous.includes(id)
+            ? previous.filter((restaurantId) => restaurantId !== id)
+            : [...previous, id]);
+    }
+
     function submitVote() {
-        if (!selected || !member) return;
+        if (selected.length === 0 || !member) return;
         const next = { ...room, votes: { ...room.votes, [member]: selected } };
         saveRoom(roomId, next);
         router.push(`/room/${roomId}/results`);
@@ -44,7 +51,7 @@ export default function Voting({ roomId }: { roomId: string }) {
                 <section className="relative z-10 px-6 pt-20 text-center">
                     <p className="text-[10px] uppercase tracking-[0.35em] text-[#777466]"> The final say </p>
                     <h1 className="mt-5 font-serif text-[clamp(4rem,9vw,8rem)] uppercase leading-[0.85] tracking-[-0.05em]"> Cast your vote. </h1>
-                    <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]"> Every opinion matters. Choose the restaurant you'd most like to visit. </p>
+                    <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]"> Every opinion matters. Choose all restaurants you would be happy to visit. </p>
                     <p className="mt-4 text-xs uppercase tracking-[0.2em] text-[#777466]"> Voting as {member || "Guest"} </p>
                 </section>
 
@@ -53,7 +60,7 @@ export default function Voting({ roomId }: { roomId: string }) {
                         {eligible.length === 0 && <p className="py-10 text-center text-sm text-[#68665A]">No eligible restaurants. Return to nominations.</p>}
 
                         {eligible.map((restaurant, index) => (
-                            <button key={restaurant.id} onClick={() => setSelected(restaurant.id)} className={`flex w-full items-center justify-between gap-5 border-b border-[#343329]/25 px-4 py-7 text-left transition ${selected === restaurant.id ? "bg-[#D9D9C5]/60" : "hover:bg-white/30"}`}>
+                            <button key={restaurant.id} onClick={() => toggleRestaurant(restaurant.id)} className={`flex w-full items-center justify-between gap-5 border-b border-[#343329]/25 px-4 py-7 text-left transition ${selected.includes(restaurant.id) ? "bg-[#D9D9C5]/60" : "hover:bg-white/30"}`}>
                                 <div className="flex items-center gap-6">
                                     <span className="text-[10px] text-[#777466]">{String(index + 1).padStart(2, "0")}</span>
                                     <div>
@@ -62,16 +69,16 @@ export default function Voting({ roomId }: { roomId: string }) {
                                         <p className="mt-2 text-xs text-[#777466]">Nominated by {restaurant.nominatedBy}</p>
                                     </div>
                                 </div>
-                                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#343329] ${selected === restaurant.id ? "bg-[#343329] text-white" : ""}`}>
-                                    {selected === restaurant.id && "✓"}
+                                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#343329] ${selected.includes(restaurant.id) ? "bg-[#343329] text-white" : ""}`}>
+                                    {selected.includes(restaurant.id) && "✓"}
                                 </span>
                             </button>
                         ))}
                     </div>
 
                     <div className="mt-14 text-center">
-                        <p className="text-sm text-[#68665A]">Select one restaurant to cast your vote.</p>
-                        <button onClick={submitVote} disabled={!selected || !member} className="mt-8 rounded-full bg-[#343329] px-12 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
+                        <p className="text-sm text-[#68665A]">Select as many restaurants as you like.</p>
+                        <button onClick={submitVote} disabled={selected.length === 0 || !member} className="mt-8 rounded-full bg-[#343329] px-12 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
                             Submit My Vote →
                         </button>
                         {!member && <p className="mt-4 text-xs text-[#9C5A49]">Join the group room before voting.</p>}

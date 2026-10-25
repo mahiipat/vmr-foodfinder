@@ -16,7 +16,7 @@ export default function Results({ roomId }: { roomId: string }) {
     const eligible = room.restaurants.filter((r) => r.price <= room.budget);
     const rankings = eligible.map((restaurant) => ({
         ...restaurant,
-        count: Object.values(room.votes).filter((id) => id === restaurant.id).length,
+        count: Object.values(room.votes).filter((ids) => ids.includes(restaurant.id)).length,
     })).sort((a, b) => b.count - a.count);
 
     const totalVotes = Object.keys(room.votes).length;
