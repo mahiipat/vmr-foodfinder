@@ -1,24 +1,37 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getRoom, saveRoom, getMember, RoomData } from "../../../../lib/foodfinder";
+import {
+    submitVotes,
+    subscribeRoomState,
+    type RoomState,
+} from "../../../../backend/AppBackend";
+import { getMemberSession } from "../../../../lib/foodfinder";
 
 export default function Voting({ roomId }: { roomId: string }) {
     const router = useRouter();
-    const [room, setRoom] = useState<RoomData>({ members: [], budget: 30, restaurants: [], votes: {} });
-    const [member, setCurrentMember] = useState("");
+    const session = useMemo(() => getMemberSession(roomId), [roomId]);
+    const memberId = session?.memberId || "";
+    const memberName = session?.name || "";
+    const [state, setState] = useState<RoomState | null>(null);
     const [selected, setSelected] = useState<string[]>([]);
     const [loaded, setLoaded] = useState(false);
 
     useEffect(() => {
-        const data = getRoom(roomId);
-        const currentMember = getMember(roomId);
-        setRoom(data);
-        setCurrentMember(currentMember);
-        const previousVote = data.votes[currentMember];
-        setSelected(Array.isArray(previousVote) ? previousVote : previousVote ? [previousVote] : []);
-        setLoaded(true);
-    }, [roomId]);
+        const stop = subscribeRoomState(roomId, (nextState) => {
+            setState(nextState);
+            setLoaded(true);
+
+            if (!nextState || !memberId) {
+                return;
+            }
+
+            const previousVote = nextState.votesByMember[memberId] || [];
+            setSelected(previousVote);
+        });
+
+        return () => stop();
+    }, [roomId, memberId]);
 
     function toggleRestaurant(id: string) {
         setSelected((previous) => previous.includes(id)
@@ -26,14 +39,13 @@ export default function Voting({ roomId }: { roomId: string }) {
             : [...previous, id]);
     }
 
-    function submitVote() {
-        if (selected.length === 0 || !member) return;
-        const next = { ...room, votes: { ...room.votes, [member]: selected } };
-        saveRoom(roomId, next);
+    async function submitVote() {
+        if (selected.length === 0 || !memberId) return;
+        await submitVotes(roomId, memberId, selected);
         router.push(`/room/${roomId}/results`);
     }
 
-    const eligible = room.restaurants.filter((r) => r.price <= room.budget);
+    const eligible = state?.options || [];
 
     if (!loaded) return <main className="min-h-screen bg-[#F0EADF] p-10">Loading...</main>;
 
@@ -52,7 +64,7 @@ export default function Voting({ roomId }: { roomId: string }) {
                     <p className="text-[10px] uppercase tracking-[0.35em] text-[#777466]"> The final say </p>
                     <h1 className="mt-5 font-serif text-[clamp(4rem,9vw,8rem)] uppercase leading-[0.85] tracking-[-0.05em]"> Cast your vote. </h1>
                     <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]"> Every opinion matters. Choose all restaurants you would be happy to visit. </p>
-                    <p className="mt-4 text-xs uppercase tracking-[0.2em] text-[#777466]"> Voting as {member || "Guest"} </p>
+                    <p className="mt-4 text-xs uppercase tracking-[0.2em] text-[#777466]"> Voting as {memberName || "Guest"} </p>
                 </section>
 
                 <section className="relative z-10 mx-auto mt-16 max-w-3xl px-8 pb-24">
@@ -65,8 +77,8 @@ export default function Voting({ roomId }: { roomId: string }) {
                                     <span className="text-[10px] text-[#777466]">{String(index + 1).padStart(2, "0")}</span>
                                     <div>
                                         <h2 className="font-serif text-3xl sm:text-4xl">{restaurant.name}</h2>
-                                        <p className="mt-2 text-xs text-[#68665A]">{restaurant.location || "Location not provided"} · Approx. ${restaurant.price}/person</p>
-                                        <p className="mt-2 text-xs text-[#777466]">Nominated by {restaurant.nominatedBy}</p>
+                                        <p className="mt-2 text-xs text-[#68665A]">{restaurant.cuisine} · {restaurant.priceLabel}</p>
+                                        <p className="mt-2 text-xs text-[#777466]">⭐ {restaurant.rating.toFixed(1)} ({restaurant.reviewCount} ratings)</p>
                                     </div>
                                 </div>
                                 <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#343329] ${selected.includes(restaurant.id) ? "bg-[#343329] text-white" : ""}`}>
@@ -78,10 +90,10 @@ export default function Voting({ roomId }: { roomId: string }) {
 
                     <div className="mt-14 text-center">
                         <p className="text-sm text-[#68665A]">Select as many restaurants as you like.</p>
-                        <button onClick={submitVote} disabled={selected.length === 0 || !member} className="mt-8 rounded-full bg-[#343329] px-12 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
+                        <button onClick={submitVote} disabled={selected.length === 0 || !memberId} className="mt-8 rounded-full bg-[#343329] px-12 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
                             Submit My Vote →
                         </button>
-                        {!member && <p className="mt-4 text-xs text-[#9C5A49]">Join the group room before voting.</p>}
+                        {!memberId && <p className="mt-4 text-xs text-[#9C5A49]">Join the group room before voting.</p>}
                     </div>
                 </section>
 

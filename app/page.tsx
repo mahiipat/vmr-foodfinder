@@ -1,15 +1,17 @@
 "use client";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useState } from "react";
+import { createGroup as createGroupRecord } from "../backend/AppBackend";
 
 export default function Home() {
     const router = useRouter();
     const [groupName, setGroupName] = useState("");
 
-    function createGroup() {
+    async function createGroup() {
         if (!groupName.trim()) return;
-        const id = crypto.randomUUID().slice(0, 8);
-        router.push(`/room/${id}`);
+        const { roomId } = await createGroupRecord({ groupName: groupName.trim() });
+        router.push(`/room/${roomId}`);
     }
 
     return (
@@ -19,7 +21,7 @@ export default function Home() {
 
                 <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/10 px-6 py-6 sm:px-12">
                     <a href="#create" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Create Group </a>
-                    <a href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </a>
+                    <Link href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </Link>
                     <a href="#about" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> About </a>
                 </nav>
 
