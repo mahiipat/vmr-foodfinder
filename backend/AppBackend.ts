@@ -302,15 +302,16 @@ export async function joinGroup(
   name = "Anonymous",
   memberId = uuid(),
 ) {
-  await setDoc(
-    doc(db, "rooms", roomId),
-    {
+  const roomRef = doc(db, "rooms", roomId);
+  const roomSnap = await getDoc(roomRef);
+
+  if (!roomSnap.exists()) {
+    await setDoc(roomRef, {
       groupName: "Untitled Group",
       location: "Unknown",
       createdAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
+    });
+  }
 
   await setDoc(doc(db, "rooms", roomId, "members", memberId), {
     name,
