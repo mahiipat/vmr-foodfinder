@@ -9,11 +9,10 @@ export default function Home() {
     const [groupName, setGroupName] = useState("");
     const [groupLocation, setGroupLocation] = useState("");
 
-    function createGroup() {
+    async function createGroup() {
         if (!groupName.trim() || !groupLocation.trim()) return;
-        const id = crypto.randomUUID().slice(0, 8);
-        localStorage.setItem(`foodfinder-location-${id}`, groupLocation.trim());
-        router.push(`/room/${id}`);
+        const { roomId } = await createGroupRecord({ groupName: groupName.trim() });
+        router.push(`/room/${roomId}`);
     }
 
     return (
