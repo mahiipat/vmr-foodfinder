@@ -1,27 +1,32 @@
 "use client";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getRoom, saveRoom, getMember, setMember } from "../../../lib/foodfinder";
+import { joinGroup, subscribeRoomState } from "../../../backend/AppBackend";
+import { getMemberSession, setMemberSession } from "../../../lib/foodfinder";
 
 export default function GroupRoom({ roomId }: { roomId: string }) {
+    const router = useRouter();
     const [name, setName] = useState("");
-    const [members, setMembers] = useState<string[]>([]);
-    const [currentMember, setCurrentMember] = useState("");
+    const [members, setMembers] = useState<Array<{ id: string; name: string }>>([]);
+    const [currentMember, setCurrentMember] = useState(() => getMemberSession(roomId)?.name || "");
     const [copied, setCopied] = useState(false);
+
     useEffect(() => {
-        setMembers(getRoom(roomId).members);
-        setCurrentMember(getMember(roomId));
+        const stop = subscribeRoomState(roomId, (state) => {
+            setMembers(state?.members || []);
+        });
+
+        return () => stop();
     }, [roomId]);
 
-    function joinGroup() {
+    async function handleJoinGroup() {
         const trimmed = name.trim();
         if (!trimmed) return;
 
-        const room = getRoom(roomId);
-        const updatedMembers = room.members.includes(trimmed) ? room.members : [...room.members, trimmed];
-
-        saveRoom(roomId, { ...room, members: updatedMembers });
-        setMember(roomId, trimmed);
-        setMembers(updatedMembers);
+        const existing = getMemberSession(roomId);
+        const { memberId } = await joinGroup(roomId, trimmed, existing?.memberId);
+        setMemberSession(roomId, { memberId, name: trimmed });
         setCurrentMember(trimmed);
         setName("");
     }
@@ -42,8 +47,8 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                 <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_10%_95%,rgba(231,153,108,0.45),transparent_45%),radial-gradient(ellipse_at_95%_90%,rgba(143,157,112,0.40),transparent_45%)]"></div>
 
                 <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/10 px-6 py-6 sm:px-12">
-                    <a href="/" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> ← Home </a>
-                    <a href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </a>
+                    <Link href="/" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> ← Home </Link>
+                    <Link href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </Link>
                     <span className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Your Room </span>
                 </nav>
 
@@ -83,11 +88,11 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                             placeholder="Your name"
                             value={name}
                             onChange={(e) => setName(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") joinGroup(); }}
+                            onKeyDown={(e) => { if (e.key === "Enter") handleJoinGroup(); }}
                             className="mt-7 w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
                         />
 
-                        <button onClick={joinGroup} disabled={!name.trim()} className="mt-6 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
+                        <button onClick={handleJoinGroup} disabled={!name.trim()} className="mt-6 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
                             Join Group →
                         </button>
                         {currentMember && (
@@ -108,8 +113,8 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                             ) : (
                                 <div>
                                     {members.map((member, index) => (
-                                        <div key={index} className="flex items-center justify-between border-b border-[#343329]/20 py-4">
-                                            <span className="font-serif text-2xl"> {member} </span>
+                                        <div key={member.id} className="flex items-center justify-between border-b border-[#343329]/20 py-4">
+                                            <span className="font-serif text-2xl"> {member.name} </span>
                                             <span className="text-[10px] uppercase tracking-[0.2em] text-[#777466]"> Guest {String(index + 1).padStart(2, "0")} </span>
                                         </div>
                                     ))}
@@ -129,7 +134,7 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                             Time to nominate your favorite restaurants and discover where everyone wants to eat.
                         </p>
 
-                        <button onClick={() => window.location.href = `/room/${roomId}/nominations`} disabled={!currentMember} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
+                        <button onClick={() => router.push(`/room/${roomId}/nominations`)} disabled={!currentMember} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
                             Continue to Nominations →
                         </button>
                     </div>
