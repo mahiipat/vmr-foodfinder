@@ -5,10 +5,12 @@ import { useState } from "react";
 export default function Home() {
     const router = useRouter();
     const [groupName, setGroupName] = useState("");
+    const [groupLocation, setGroupLocation] = useState("");
 
     function createGroup() {
-        if (!groupName.trim()) return;
+        if (!groupName.trim() || !groupLocation.trim()) return;
         const id = crypto.randomUUID().slice(0, 8);
+        localStorage.setItem(`foodfinder-location-${id}`, groupLocation.trim());
         router.push(`/room/${id}`);
     }
 
@@ -56,9 +58,25 @@ export default function Home() {
                                 onKeyDown={(e) => { if (e.key === "Enter") createGroup(); }}
                                 className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
                             />
+                            <div className="mt-6">
+                                <input
+                                    type="text"
+                                    placeholder="Group location (City or ZIP code)"
+                                    value={groupLocation}
+                                    onChange={(e) => setGroupLocation(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter") createGroup();
+                                    }}
+                                    className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
+                                    required
+                                />
+                                <p className="mt-2 text-xs text-[#777466]">
+                                    * Required for matching restaurants near your group.
+                                </p>
+                            </div>
                             <button
                                 onClick={createGroup}
-                                disabled={!groupName.trim()}
+                                disabled={!groupName.trim() || !groupLocation.trim()}
                                 className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                                 Create Your Group →
