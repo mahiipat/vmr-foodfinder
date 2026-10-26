@@ -7,6 +7,7 @@ import {
     type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
+import { trackEvent, trackScreen } from "../../../../lib/analytics";
 
 export default function Voting({ roomId }: { roomId: string }) {
     const router = useRouter();
@@ -17,6 +18,10 @@ export default function Voting({ roomId }: { roomId: string }) {
     const [selected, setSelected] = useState<string[]>([]);
     const [loaded, setLoaded] = useState(false);
     const hasHydratedVote = useRef(false);
+
+    useEffect(() => {
+        void trackScreen("voting");
+    }, []);
 
     useEffect(() => {
         hasHydratedVote.current = false;
@@ -41,11 +46,16 @@ export default function Voting({ roomId }: { roomId: string }) {
         setSelected((previous) => previous.includes(id)
             ? previous.filter((restaurantId) => restaurantId !== id)
             : [...previous, id]);
+        void trackEvent("vote_selection_changed", {
+            selected_restaurant_id: id,
+            action: selected.includes(id) ? "removed" : "added",
+        });
     }
 
     async function submitVote() {
         if (selected.length === 0 || !memberId) return;
         await submitVotes(roomId, memberId, selected);
+        void trackEvent("votes_submitted", { selected_restaurant_count: selected.length });
         router.push(`/room/${roomId}/results`);
     }
 

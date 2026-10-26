@@ -11,6 +11,7 @@ import {
   type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
+import { trackEvent, trackScreen } from "../../../../lib/analytics";
 
 export default function Nominations({ roomId }: { roomId: string }) {
   const router = useRouter();
@@ -20,6 +21,10 @@ export default function Nominations({ roomId }: { roomId: string }) {
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState("");
+
+  useEffect(() => {
+    void trackScreen("nominations");
+  }, []);
 
   useEffect(() => {
     const stop = subscribeRoomState(roomId, (nextState) => {
@@ -52,6 +57,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
       budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
       favorites: [],
     });
+    void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
   }
 
   async function toggleBudgetRange(range: BudgetRange) {
@@ -72,6 +78,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
     });
 
     setName("");
+    void trackEvent("restaurant_nominated");
   }
 
   async function markReady() {
@@ -83,6 +90,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
     });
 
     await markMemberReadyForVoting(roomId, memberId, true);
+    void trackEvent("ready_to_vote");
   }
 
   if (!loaded) {

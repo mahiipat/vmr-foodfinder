@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { joinGroup, subscribeRoomState } from "../../../backend/AppBackend";
 import { getMemberSession, setMemberSession } from "../../../lib/foodfinder";
+import { trackEvent, trackScreen } from "../../../lib/analytics";
 
 export default function GroupRoom({ roomId }: { roomId: string }) {
     const router = useRouter();
@@ -11,6 +12,10 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
     const [members, setMembers] = useState<Array<{ id: string; name: string }>>([]);
     const [currentMember, setCurrentMember] = useState(() => getMemberSession(roomId)?.name || "");
     const [copied, setCopied] = useState(false);
+
+    useEffect(() => {
+        void trackScreen("group_room");
+    }, []);
 
     useEffect(() => {
         const stop = subscribeRoomState(roomId, (state) => {
@@ -29,12 +34,14 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
         setMemberSession(roomId, { memberId, name: trimmed });
         setCurrentMember(trimmed);
         setName("");
+        void trackEvent("group_joined", { returning_member: Boolean(existing?.memberId) });
     }
 
     async function copyLink() {
         try {
             await navigator.clipboard.writeText(window.location.href);
             setCopied(true);
+            void trackEvent("invite_link_copied");
             setTimeout(() => setCopied(false), 2000);
         } catch {
             alert("Unable to copy link. Please copy it from your browser.");
@@ -97,7 +104,7 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                         </button>
                         {currentMember && (
                             <p className="mt-4 text-center text-xs text-[#68665A]">
-                                ✓ You're joining as {currentMember}
+                                ✓ You&apos;re joining as {currentMember}
                             </p>
                         )}
                     </div>
@@ -129,12 +136,12 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                 <section className="relative z-10 mx-auto max-w-4xl px-8 pb-24 text-center">
                     <div className="border-t border-[#343329]/25 pt-10">
                         <p className="mb-4 text-[10px] uppercase tracking-[0.3em] text-[#777466]"> The next step </p>
-                        <h2 className="font-serif text-4xl sm:text-5xl"> What's on the menu? </h2>
+                        <h2 className="font-serif text-4xl sm:text-5xl"> What&apos;s on the menu? </h2>
                         <p className="mx-auto mt-4 max-w-sm text-sm leading-7 text-[#68665A]">
                             Time to nominate your favorite restaurants and discover where everyone wants to eat.
                         </p>
 
-                        <button onClick={() => router.push(`/room/${roomId}/nominations`)} disabled={!currentMember} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
+                        <button onClick={() => { void trackEvent("nominations_started"); router.push(`/room/${roomId}/nominations`); }} disabled={!currentMember} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
                             Continue to Nominations →
                         </button>
                     </div>

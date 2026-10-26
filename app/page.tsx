@@ -1,17 +1,24 @@
 "use client";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createGroup as createGroupRecord } from "../backend/AppBackend";
+import { trackEvent, trackScreen } from "../lib/analytics";
 
 export default function Home() {
     const router = useRouter();
     const [groupName, setGroupName] = useState("");
     const [groupLocation, setGroupLocation] = useState("");
 
+    useEffect(() => {
+        void trackScreen("home");
+    }, []);
+
     async function createGroup() {
         if (!groupName.trim() || !groupLocation.trim()) return;
+        void trackEvent("group_creation_started");
         const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
+        void trackEvent("group_created");
         router.push(`/room/${roomId}`);
     }
 

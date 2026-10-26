@@ -5,11 +5,16 @@ import {
   subscribeRoomState,
   type RoomState,
 } from "../../../../backend/AppBackend";
+import { trackEvent, trackScreen } from "../../../../lib/analytics";
 
 export default function Results({ roomId }: { roomId: string }) {
   const router = useRouter();
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    void trackScreen("results");
+  }, []);
 
   useEffect(() => {
     const stop = subscribeRoomState(roomId, (nextState) => {
@@ -36,7 +41,7 @@ export default function Results({ roomId }: { roomId: string }) {
 
         <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/15 px-6 py-6 sm:px-12">
           <button
-            onClick={() => router.push(`/room/${roomId}/vote`)}
+            onClick={() => { void trackEvent("return_to_voting"); router.push(`/room/${roomId}/vote`); }}
             className="text-[10px] uppercase tracking-[0.2em]"
           >
             {" "}
@@ -172,7 +177,7 @@ export default function Results({ roomId }: { roomId: string }) {
               Back to Voting{" "}
             </button>
             <button
-              onClick={() => router.push("/")}
+              onClick={() => { void trackEvent("new_group_started"); router.push("/"); }}
               className="rounded-full bg-[#343329] px-8 py-4 text-[10px] uppercase tracking-[0.2em] text-white"
             >
               {" "}
