@@ -11,7 +11,7 @@ export default function Home() {
 
     async function createGroup() {
         if (!groupName.trim() || !groupLocation.trim()) return;
-        const { roomId } = await createGroupRecord({ groupName: groupName.trim() });
+        const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
         router.push(`/room/${roomId}`);
     }
 
