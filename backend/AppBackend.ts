@@ -8,6 +8,8 @@ import {
   serverTimestamp,
   setDoc,
   Unsubscribe,
+  arrayUnion,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -164,11 +166,21 @@ function normalize(input: string): string {
   return input.trim().toLowerCase();
 }
 
+function slug(input: string): string {
+  return normalize(input)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+}
+
 function uuid(): string {
   return (
     globalThis.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
+}
+
+function restaurantDocId(nameOrId: string): string {
+  return slug(nameOrId) || `custom-${uuid()}`;
 }
 
 function resolveRestaurant(nameOrId: string): Restaurant {
@@ -182,7 +194,7 @@ function resolveRestaurant(nameOrId: string): Restaurant {
   // this needs to be done so that type script can be happy
 
   return {
-    id: `custom-${uuid()}`,
+    id: restaurantDocId(nameOrId),
     name: nameOrId,
     cuisine: "Custom",
     priceLevel: "PRICE_LEVEL_MODERATE",
@@ -349,6 +361,24 @@ export async function submitPreferences(
     },
     { merge: true },
   );
+
+  const nominatedRestaurants = dedupeNames(input.favorites ?? []).map((name) =>
+    resolveRestaurant(name),
+  );
+
+  await Promise.all(
+    nominatedRestaurants.map((restaurant) =>
+      setDoc(
+        doc(db, "rooms", roomId, "restaurants", restaurant.id),
+        {
+          ...restaurant,
+          nominatedByMemberIds: arrayUnion(memberId),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      ),
+    ),
+  );
 }
 
 export async function markMemberReadyForVoting(
@@ -372,15 +402,43 @@ export async function submitVotes(
     },
     { merge: true },
   );
+
+  const [votesSnap, restaurantsSnap] = await Promise.all([
+    getDocs(collection(db, "rooms", roomId, "votes")),
+    getDocs(collection(db, "rooms", roomId, "restaurants")),
+  ]);
+
+  const voteCount = new Map<string, number>();
+  for (const vote of votesSnap.docs) {
+    const ids = (vote.get("restaurantIds") as string[] | undefined) || [];
+    for (const restaurantId of ids) {
+      voteCount.set(restaurantId, (voteCount.get(restaurantId) || 0) + 1);
+    }
+  }
+
+  const batch = writeBatch(db);
+  for (const restaurant of restaurantsSnap.docs) {
+    batch.set(
+      restaurant.ref,
+      {
+        votes: voteCount.get(restaurant.id) || 0,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
+
+  await batch.commit();
 }
 
 export async function getRoomState(roomId: string): Promise<RoomState | null> {
   const roomRef = doc(db, "rooms", roomId);
-  const [roomSnap, memberSnap, prefSnap, voteSnap] = await Promise.all([
+  const [roomSnap, memberSnap, prefSnap, voteSnap, restaurantSnap] = await Promise.all([
     getDoc(roomRef),
     getDocs(collection(db, "rooms", roomId, "members")),
     getDocs(collection(db, "rooms", roomId, "preferences")),
     getDocs(collection(db, "rooms", roomId, "votes")),
+    getDocs(collection(db, "rooms", roomId, "restaurants")),
   ]);
 
   if (!roomSnap.exists()) {
@@ -405,18 +463,40 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
     restaurantIds: (item.get("restaurantIds") as string[] | undefined) || [],
   }));
 
-  const dedupedFavorites = Array.from(
+  const allRestaurants: Restaurant[] = restaurantSnap.docs.map((item) => {
+    const priceLevel = item.get("priceLevel") as PriceLevel | undefined;
+    const budgetRange =
+      (item.get("budgetRange") as BudgetRange | undefined) ||
+      (priceLevel ? priceLevelToBudgetRange[priceLevel] : "TEN_TO_THIRTY");
+
+    return {
+      id: item.id,
+      name: (item.get("name") as string | undefined) || item.id,
+      cuisine: (item.get("cuisine") as string | undefined) || "Custom",
+      priceLevel,
+      budgetRange,
+      priceLabel:
+        (item.get("priceLabel") as string | undefined) ||
+        budgetRangeLabels[budgetRange],
+      distanceMiles: (item.get("distanceMiles") as number | undefined) ?? 1,
+      rating: (item.get("rating") as number | undefined) ?? 4,
+      reviewCount: (item.get("reviewCount") as number | undefined) ?? 0,
+    };
+  });
+
+  const fallbackRestaurants = Array.from(
     new Set(
       preferences
         .flatMap((pref) => pref.favorites)
-        .filter(Boolean)
-        .map((name) => normalize(name)),
+        .filter(Boolean),
     ),
-  );
+  ).map((name) => resolveRestaurant(name));
 
-  const options = dedupedFavorites
-    .map(resolveRestaurant)
-    .filter((restaurant) => passesBudgetRanges(restaurant, preferences));
+  const sourceRestaurants = allRestaurants.length ? allRestaurants : fallbackRestaurants;
+
+  const options = sourceRestaurants.filter((restaurant) =>
+    passesBudgetRanges(restaurant, preferences),
+  );
 
   const voteCount = new Map<string, number>();
   const votesByMember: Record<string, string[]> = {};
@@ -471,6 +551,7 @@ export function subscribeRoomState(
     onSnapshot(doc(db, "rooms", roomId), emit, emitError),
     onSnapshot(collection(db, "rooms", roomId, "members"), emit, emitError),
     onSnapshot(collection(db, "rooms", roomId, "preferences"), emit, emitError),
+    onSnapshot(collection(db, "rooms", roomId, "restaurants"), emit, emitError),
     onSnapshot(collection(db, "rooms", roomId, "votes"), emit, emitError),
   ];
 

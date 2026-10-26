@@ -125,8 +125,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
           </h1>
           <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]">
             {" "}
-            Suggest your favorite places. We'll narrow down the options to fit
-            everyone's budget range.{" "}
+            Suggest your favorite places. We&apos;ll narrow down the options to fit
+            everyone&apos;s budget range.{" "}
           </p>
         </section>
 
@@ -208,7 +208,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
             </p>
             <h2 className="mt-4 font-serif text-4xl"> The contenders. </h2>
             <p className="mt-3 text-sm text-[#68665A]">
-              {restaurants.length} currently match everyone's range
+              {restaurants.length} currently match everyone&apos;s range
             </p>
 
             {restaurants.length === 0 && (
@@ -250,7 +250,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
           </h2>
           <p className="mt-4 text-sm text-[#68665A]">
             {waiting
-              ? "You're ready! Waiting for everyone else."
+              ? "You&apos;re ready! Waiting for everyone else."
               : "Time to let everyone have their say."}
           </p>
           <p className="mt-3 text-xs text-[#777466]">
@@ -267,7 +267,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
           ) : (
             <div className="mt-8">
               <p className="font-serif text-2xl text-[#566B48]">
-                You're ready to vote!
+                You&apos;re ready to vote!
               </p>
 
               <p className="mt-4 text-xs text-[#777466]">

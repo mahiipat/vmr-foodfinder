@@ -60,7 +60,7 @@ export default function Results({ roomId }: { roomId: string }) {
           </h1>
           <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]">
             {" "}
-            Your group's preferences, all in one place. Here's how the votes
+            Your group&apos;s preferences, all in one place. Here&apos;s how the votes
             stack up.{" "}
           </p>
         </section>
@@ -106,7 +106,7 @@ export default function Results({ roomId }: { roomId: string }) {
               <>
                 <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">
                   {" "}
-                  It's a tie{" "}
+                  It&apos;s a tie{" "}
                 </p>
                 <h2 className="mt-5 font-serif text-5xl">
                   {" "}

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
     submitVotes,
@@ -16,18 +16,22 @@ export default function Voting({ roomId }: { roomId: string }) {
     const [state, setState] = useState<RoomState | null>(null);
     const [selected, setSelected] = useState<string[]>([]);
     const [loaded, setLoaded] = useState(false);
+    const hasHydratedVote = useRef(false);
 
     useEffect(() => {
+        hasHydratedVote.current = false;
+
         const stop = subscribeRoomState(roomId, (nextState) => {
             setState(nextState);
             setLoaded(true);
 
-            if (!nextState || !memberId) {
+            if (!nextState || !memberId || hasHydratedVote.current) {
                 return;
             }
 
             const previousVote = nextState.votesByMember[memberId] || [];
             setSelected(previousVote);
+            hasHydratedVote.current = true;
         });
 
         return () => stop();
