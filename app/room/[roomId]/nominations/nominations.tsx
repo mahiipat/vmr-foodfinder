@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getRoom, saveRoom, getMember, RoomData } from "../../../../lib/foodfinder";
+import { getRoom, saveRoom, getMember, RoomData, eligibleRestaurants } from "../../../../lib/foodfinder";
+import LocationDistance from "../locationDistance";
 
 export default function Nominations({ roomId }: { roomId: string }) {
     const router = useRouter();
@@ -45,7 +46,9 @@ export default function Nominations({ roomId }: { roomId: string }) {
             nominatedBy: member,
         };
 
-        updateRoom({ ...room, restaurants: [...room.restaurants, restaurant], votes: {} });
+        updateRoom({ ...room, restaurants: [...room.restaurants, restaurant], votes: {}, readyMembers: [], needsMoreNominations: false, });
+        setWaiting(false);
+        setCanMoveToVoting(false);
         setName("");
         setPrice("");
         setLocation("");
@@ -53,18 +56,33 @@ export default function Nominations({ roomId }: { roomId: string }) {
     }
 
     function removeRestaurant(id: string) {
-        updateRoom({ ...room, restaurants: room.restaurants.filter((r) => r.id !== id), votes: {} });
+        const restaurant = room.restaurants.find((r) => r.id === id);
+        if (!restaurant || restaurant.nominatedBy !== member) return;
+        updateRoom({ ...room, restaurants: room.restaurants.filter((r) => r.id !== id), votes: {}, readyMembers: [], needsMoreNominations: false });
+        setWaiting(false);
+        setCanMoveToVoting(false);
     }
-
-    const eligible = room.restaurants.filter((r) => r.price <= room.budget);
-    const excluded = room.restaurants.filter((r) => r.price > room.budget);
-
+    const myRestaurants = room.restaurants.filter((restaurant) => restaurant.nominatedBy === member);
+    const eligible = eligibleRestaurants(room).filter((restaurant) => restaurant.nominatedBy === member);
+    const excluded = myRestaurants.filter((restaurant) => !eligible.some((item) => item.id === restaurant.id));
+    
     function markReady() {
-        if (!member || eligible.length === 0) return;
-
+        if (!member) return;
+        const eligible = eligibleRestaurants(room);
+        if (eligible.length === 0) {
+            updateRoom(
+                {...room, needsMoreNominations: true, readyMembers: [],}
+            );
+            setWaiting(false);
+            setCanMoveToVoting(false);
+            return;
+        }
+        updateRoom(
+            {...room, needsMoreNominations: false, readyMembers: [...new Set([...(room.readyMembers || []), member]),],}
+        );
         setWaiting(true);
-        setCanMoveToVoting(true); // used so can test the voting page before backend implementation
     }
+
 
     if (!loaded) { return (
             <main className="min-h-screen bg-[#F0EADF] p-10">
@@ -90,6 +108,15 @@ export default function Nominations({ roomId }: { roomId: string }) {
                     <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]"> Suggest your favorite places. We'll narrow down the options to fit the group's budget. </p>
                 </section>
 
+                <section className="relative z-10 mx-auto max-w-5xl px-8">
+                    <LocationDistance room={room} onUpdate={(nextRoom) => {
+                            updateRoom({...nextRoom, votes: {}, readyMembers: [], needsMoreNominations: false, });
+                            setWaiting(false);
+                            setCanMoveToVoting(false);
+                        }}
+                    />
+                </section>
+
                 <section className="relative z-10 mx-auto mt-20 grid max-w-5xl gap-14 px-8 pb-20 md:grid-cols-2">
                     <div className="border-t border-[#343329]/30 pt-8">
                         <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]"> 01 / Set your limits </p>
@@ -97,7 +124,13 @@ export default function Nominations({ roomId }: { roomId: string }) {
                         <p className="mt-3 text-sm text-[#68665A]"> Maximum estimated price per person. </p>
                         <div className="mt-8 flex items-center gap-4">
                             <span className="font-serif text-4xl">$</span>
-                            <input type="number" min="1" value={room.budget} onChange={(e) => updateRoom({ ...room, budget: Math.max(1, Number(e.target.value) || 1), votes: {} })} className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-3 font-serif text-3xl outline-none"/>
+                            <input type="number" min="1" value={room.budget} onChange={(e) => {
+                            updateRoom({ ...room, budget: Math.max(1, Number(e.target.value) || 1), votes: {}, readyMembers: [], needsMoreNominations: false });
+                            setWaiting(false);
+                            setCanMoveToVoting(false);
+                        }}
+                        className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-3 font-serif text-3xl outline-none"
+                        />
                         </div>
                         <p className="mt-4 text-xs text-[#777466]"> Restaurants above this amount will be excluded from voting. </p>
                     </div>
@@ -157,14 +190,14 @@ export default function Nominations({ roomId }: { roomId: string }) {
                         <h2 className="mt-4 font-serif text-4xl"> The contenders. </h2>
                         <p className="mt-3 text-sm text-[#68665A]">{eligible.length} within budget · {excluded.length} excluded</p>
 
-                        {room.restaurants.length === 0 && (
+                        {myRestaurants.length === 0 && (
                             <p className="mt-8 text-sm italic text-[#777466]">
                                 No restaurants nominated yet.
                             </p>
                         )}
 
                         <div className="mt-8 grid gap-5 md:grid-cols-2">
-                            {room.restaurants.map((restaurant) => (
+                            {myRestaurants.map((restaurant) => (
                                 <div key={restaurant.id} className="border border-[#343329]/20 bg-white/20 p-6">
                                     <div className="flex items-start justify-between gap-4">
                                         <h3 className="font-serif text-3xl">{restaurant.name}</h3>
@@ -188,10 +221,17 @@ export default function Nominations({ roomId }: { roomId: string }) {
                                         )}
 
                                         <button
+                                            type="button"
                                             onClick={() => removeRestaurant(restaurant.id)}
-                                            className="text-xs underline"
+                                            aria-label={`Remove ${restaurant.name}`}
+                                            className="flex items-center gap-3 text-[#343329] hover:text-[#9C5A49]"
                                         >
-                                            Remove
+                                            <span className="flex h-8 w-8 items-center justify-center rounded-full border border-[#343329]/30 text-lg">
+                                                ×
+                                            </span>
+                                            <span className="text-[11px] uppercase tracking-[0.2em]">
+                                                Remove Nomination
+                                            </span>
                                         </button>
                                     </div>
                                 </div>
@@ -201,6 +241,28 @@ export default function Nominations({ roomId }: { roomId: string }) {
                 </section>
 
                 <section className="relative z-10 px-8 pb-24 text-center">
+                    {room.needsMoreNominations && (
+                        <div className="mx-auto mb-8 max-w-xl border border-[#9C5A49] bg-[#F4DED5] p-6 text-left">
+                            <h3 className="font-serif text-2xl text-[#9C5A49]">
+                            No restaurants made the cut.
+                            </h3>
+
+                            <p className="mt-3 text-sm leading-6 text-[#68665A]">
+                            Unfortunately, none of the nominated restaurants meet
+                            your group's current requirements.
+                            </p>
+
+                            <p className="mt-3 text-sm text-[#68665A]">
+                            Please add more restaurants or adjust your budget and
+                            distance preferences before continuing.
+                            </p>
+
+                            <p className="mt-3 text-xs text-[#9C5A49]">
+                            Everyone will need to mark themselves ready again.
+                            </p>
+                        </div>
+                        )
+                    }
                     <h2 className="font-serif text-5xl"> {waiting ? "Waiting for your group." : "Ready to decide?"} </h2>
                     <p className="mt-4 text-sm text-[#68665A]">
                         {waiting
@@ -210,7 +272,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
                     {!waiting ? (
                         <button
                             onClick={markReady}
-                            disabled={eligible.length === 0 || !member}
+                            disabled={!member}
                             className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
                         >
                             Ready to Vote →
