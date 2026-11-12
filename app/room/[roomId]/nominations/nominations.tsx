@@ -12,6 +12,7 @@ import {
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
 import { trackEvent, trackScreen } from "../../../../lib/analytics";
+import LocationDistance from "../locationDistance";
 
 export default function Nominations({ roomId }: { roomId: string }) {
   const router = useRouter();
@@ -21,6 +22,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     void trackScreen("nominations");
@@ -55,7 +58,6 @@ export default function Nominations({ roomId }: { roomId: string }) {
 
     await submitPreferences(roomId, memberId, {
       budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
-      favorites: [],
     });
     void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
   }
@@ -70,27 +72,69 @@ export default function Nominations({ roomId }: { roomId: string }) {
   }
 
   async function addRestaurant() {
-    if (!memberId || !name.trim()) return;
+    const restaurantName = name.trim();
+    if (!memberId || !restaurantName || saving) return;
+    const current = myPreference?.favorites ?? [];
+    if (current.some((favorite) => favorite.toLowerCase() === restaurantName.toLowerCase())) {
+      setError("You've already nominated this restaurant.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await submitPreferences(roomId, memberId, {
+        favorites: [...current, restaurantName],
+        budgetRanges: selectedBudgetRanges,
+      });
+      setName("");
+      void trackEvent("restaurant_nominated");
+    } catch (error) {
+      console.error(error);
+      setError("Couldn't add your nomination. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
-    await submitPreferences(roomId, memberId, {
-      favorites: [name.trim()],
-      budgetRanges: selectedBudgetRanges,
-    });
-
-    setName("");
-    void trackEvent("restaurant_nominated");
+  async function removeRestaurant(restaurantName: string) {
+    if (!memberId || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await submitPreferences(roomId, memberId, {
+        favorites: (myPreference?.favorites ?? []).filter((favorite) => favorite !== restaurantName),
+        budgetRanges: selectedBudgetRanges,
+      });
+      void trackEvent("restaurant_nomination_removed");
+    } catch (error) {
+      console.error(error);
+      setError("Couldn't remove the nomination. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function markReady() {
-    if (!memberId || !state || state.options.length === 0) return;
-
-    await submitPreferences(roomId, memberId, {
-      favorites: [],
-      budgetRanges: selectedBudgetRanges,
-    });
-
-    await markMemberReadyForVoting(roomId, memberId, true);
-    void trackEvent("ready_to_vote");
+    if (!memberId || !state || saving) return;
+    if ((myPreference?.favorites ?? []).length === 0) {
+      setError("Please add at least one nomination before you're ready to vote.");
+      return;
+    }
+    if (state.options.length === 0) {
+      setError("No restaurants match the group's budget ranges. Please adjust the ranges before voting.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await markMemberReadyForVoting(roomId, memberId, true);
+      void trackEvent("ready_to_vote");
+    } catch (error) {
+      console.error(error);
+      setError("Couldn't mark you as ready. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (!loaded) {
@@ -170,6 +214,9 @@ export default function Nominations({ roomId }: { roomId: string }) {
                 );
               })}
             </div>
+            {state && (
+              <LocationDistance roomId={roomId} state={state} disabled={saving || waiting} />
+            )}
           </div>
 
           <div className="border-t border-[#343329]/30 pt-8">
@@ -193,12 +240,38 @@ export default function Nominations({ roomId }: { roomId: string }) {
             </div>
 
             <button
-              onClick={addRestaurant}
-              disabled={!memberId || !name.trim()}
+              onClick={() => void addRestaurant()}
+              disabled={!memberId || !name.trim() || saving || waiting}
               className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
             >
               Add Nomination +
             </button>
+
+            {(myPreference?.favorites ?? []).length > 0 && (
+              <div className="mt-8 space-y-3">
+                <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">
+                  Your nominations
+                </p>
+                {(myPreference?.favorites ?? []).map((restaurantName) => (
+                  <div key={restaurantName} className="border border-[#343329]/20 bg-white/20 p-5">
+                    <h3 className="font-serif text-2xl">{restaurantName}</h3>
+                    <button
+                      type="button"
+                      disabled={saving || waiting}
+                      onClick={() => void removeRestaurant(restaurantName)}
+                      className="mt-5 flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-[#9C5A49] disabled:opacity-40"
+                    >
+                      <span aria-hidden="true" className="text-lg leading-none">⊗</span>
+                      Remove Nomination
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {error && (
+              <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{error}</p>
+            )}
 
             {!memberId && (
               <p className="mt-3 text-xs text-[#9C5A49]">
@@ -258,7 +331,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
           </h2>
           <p className="mt-4 text-sm text-[#68665A]">
             {waiting
-              ? "You&apos;re ready! Waiting for everyone else."
+              ? "You are ready! Waiting for everyone else."
               : "Time to let everyone have their say."}
           </p>
           <p className="mt-3 text-xs text-[#777466]">
@@ -266,8 +339,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
           </p>
           {!waiting ? (
             <button
-              onClick={markReady}
-              disabled={restaurants.length === 0 || !memberId}
+              onClick={() => void markReady()}
+              disabled={!memberId || saving}
               className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
             >
               Ready to Vote →

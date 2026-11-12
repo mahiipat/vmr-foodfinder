@@ -49,6 +49,8 @@ export type Restaurant = {
   distanceMiles: number;
   rating: number;
   reviewCount: number;
+  lat?: number;
+  lng?: number;
 };
 
 type PlacesApiRestaurant = {
@@ -72,6 +74,8 @@ export type RoomState = {
   allMembersReadyToVote: boolean;
   allMembersVoted: boolean;
   hasTie: boolean;
+  distanceCapMiles: number | null;
+  hostLocation: { lat?: number; lng?: number; address?: string } | null;
 };
 
 export const ALL_BUDGET_RANGES: BudgetRange[] = [
@@ -332,10 +336,11 @@ export async function submitPreferences(
   const existingFavorites = existingSnap.exists()
     ? ((existingSnap.get("favorites") as string[] | undefined) ?? [])
     : [];
-  const nextFavorites = dedupeNames([
-    ...existingFavorites,
-    ...(input.favorites ?? []),
-  ]);
+  // An explicitly supplied favorites array replaces the old list.
+  // Omitting favorites preserves the existing nominations.
+  const nextFavorites = input.favorites === undefined
+    ? dedupeNames(existingFavorites)
+    : dedupeNames(input.favorites);
 
   const existingBudgetRanges = existingSnap.exists()
     ? toBudgetRanges(existingSnap.get("budgetRanges") ?? existingSnap.get("budgetCap"))
@@ -380,6 +385,28 @@ export async function submitPreferences(
       ),
     ),
   );
+}
+
+export type HostLocation = { lat?: number; lng?: number; address?: string };
+
+export async function updateRoomDistance(
+  roomId: string,
+  input: { distanceCapMiles: number | null; hostLocation: HostLocation | null },
+) {
+  await setDoc(doc(db, "rooms", roomId), {
+    distanceCapMiles: input.distanceCapMiles,
+    hostLocation: input.hostLocation,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+}
+
+function milesBetween(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const dLat = radians(lat2 - lat1);
+  const dLng = radians(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(radians(lat1)) * Math.cos(radians(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 export async function markMemberReadyForVoting(
@@ -482,6 +509,8 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
       distanceMiles: (item.get("distanceMiles") as number | undefined) ?? 1,
       rating: (item.get("rating") as number | undefined) ?? 4,
       reviewCount: (item.get("reviewCount") as number | undefined) ?? 0,
+      lat: item.get("lat") as number | undefined,
+      lng: item.get("lng") as number | undefined,
     };
   });
 
@@ -493,11 +522,32 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
     ),
   ).map((name) => resolveRestaurant(name));
 
-  const sourceRestaurants = allRestaurants.length ? allRestaurants : fallbackRestaurants;
+  // Only restaurants currently nominated by at least one member are eligible.
+  // This also prevents removed nominations from lingering in the shortlist.
+  const activeNames = new Set(preferences.flatMap((pref) => pref.favorites).map(normalize));
+  const sourceRestaurants = [
+    ...allRestaurants.filter((restaurant) => activeNames.has(normalize(restaurant.name))),
+    ...fallbackRestaurants.filter((restaurant) =>
+      !allRestaurants.some((saved) => normalize(saved.name) === normalize(restaurant.name))
+    ),
+  ];
 
-  const options = sourceRestaurants.filter((restaurant) =>
-    passesBudgetRanges(restaurant, preferences),
-  );
+  const rawCap = roomSnap.get("distanceCapMiles");
+  const distanceCapMiles = typeof rawCap === "number" && rawCap > 0 ? rawCap : null;
+  const rawLocation = roomSnap.get("hostLocation") as HostLocation | null | undefined;
+  const hostLocation = rawLocation ?? null;
+
+  const options = sourceRestaurants.filter((restaurant) => {
+    if (!passesBudgetRanges(restaurant, preferences)) return false;
+    // Apply actual distance filtering only when BOTH coordinates are available.
+    // Mock/fallback distanceMiles values are not location-aware.
+    if (distanceCapMiles !== null &&
+        typeof hostLocation?.lat === "number" && typeof hostLocation?.lng === "number" &&
+        typeof restaurant.lat === "number" && typeof restaurant.lng === "number") {
+      return milesBetween(hostLocation.lat, hostLocation.lng, restaurant.lat, restaurant.lng) <= distanceCapMiles;
+    }
+    return true;
+  });
 
   const voteCount = new Map<string, number>();
   const votesByMember: Record<string, string[]> = {};
@@ -540,6 +590,8 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
     allMembersReadyToVote,
     allMembersVoted,
     hasTie,
+    distanceCapMiles,
+    hostLocation,
   };
 }
 
