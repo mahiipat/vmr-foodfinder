@@ -4,7 +4,9 @@ import { useRouter } from "next/navigation";
 import {
   ALL_BUDGET_RANGES,
   budgetRangeLabels,
+  groupDietaryNeeds,
   markMemberReadyForVoting,
+  nominatePlace,
   submitPreferences,
   subscribeRoomState,
   type BudgetRange,
@@ -12,6 +14,12 @@ import {
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
 import { trackEvent, trackScreen } from "../../../../lib/analytics";
+import { lookupDietary, type DietaryTag } from "../../../../lib/dietary";
+import type { PlaceResult } from "../../../../lib/places";
+import RestaurantSearch from "../../../components/restaurantSearch";
+import RestaurantCard from "../../../components/restaurantCard";
+import DietaryNeedsPicker from "../../../components/dietaryNeedsPicker";
+import { useGroupCenter } from "../../../components/useGroupCenter";
 
 export default function Nominations({ roomId }: { roomId: string }) {
   const router = useRouter();
@@ -20,7 +28,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
   const memberName = session?.name || "";
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [name, setName] = useState("");
+  const center = useGroupCenter(state?.room);
 
   useEffect(() => {
     void trackScreen("nominations");
@@ -69,16 +77,45 @@ export default function Nominations({ roomId }: { roomId: string }) {
     await saveBudgetRanges(nextRanges);
   }
 
-  async function addRestaurant() {
-    if (!memberId || !name.trim()) return;
+  async function saveDietaryNeeds(nextNeeds: DietaryTag[]) {
+    if (!memberId) return;
 
     await submitPreferences(roomId, memberId, {
-      favorites: [name.trim()],
+      dietaryNeeds: nextNeeds,
+      budgetRanges: selectedBudgetRanges,
+      favorites: [],
+    });
+    void trackEvent("dietary_needs_updated", { need_count: nextNeeds.length });
+  }
+
+  // typed name, used when Google search is unavailable or can't find the place
+  async function addRestaurant(restaurantName: string) {
+    if (!memberId || !restaurantName.trim()) return;
+
+    await submitPreferences(roomId, memberId, {
+      favorites: [restaurantName.trim()],
       budgetRanges: selectedBudgetRanges,
     });
 
-    setName("");
-    void trackEvent("restaurant_nominated");
+    void trackEvent("restaurant_nominated", { source: "typed" });
+  }
+
+  // picked from Google Places search; looks up Yelp dietary info before saving
+  async function addPlace(place: PlaceResult) {
+    if (!memberId) return;
+
+    const dietary = await lookupDietary(place);
+    await nominatePlace(roomId, memberId, {
+      ...place,
+      dietaryTags: dietary.tags,
+      dietaryChecked: dietary.checked,
+      yelpUrl: dietary.yelpUrl,
+    });
+
+    void trackEvent("restaurant_nominated", {
+      source: "google_places",
+      dietary_info_found: dietary.checked,
+    });
   }
 
   async function markReady() {
@@ -98,6 +135,9 @@ export default function Nominations({ roomId }: { roomId: string }) {
   }
 
   const restaurants = state?.options || [];
+  const myDietaryNeeds = myPreference?.dietaryNeeds || [];
+  const dietaryNeeds = groupDietaryNeeds(state?.preferences || []);
+  const nominatedPlaceIds = restaurants.flatMap((restaurant) => restaurant.placeId ? [restaurant.placeId] : []);
   const waiting = Boolean(myPreference?.readyToVote);
   const readyCount = state?.readyMemberIds.length || 0;
   const memberCount = state?.members.length || 0;
@@ -170,6 +210,12 @@ export default function Nominations({ roomId }: { roomId: string }) {
                 );
               })}
             </div>
+
+            <DietaryNeedsPicker
+              selected={myDietaryNeeds}
+              onChange={(next) => void saveDietaryNeeds(next)}
+              disabled={!memberId}
+            />
           </div>
 
           <div className="border-t border-[#343329]/30 pt-8">
@@ -183,22 +229,13 @@ export default function Nominations({ roomId }: { roomId: string }) {
               Nominating as {memberName || "Guest"}.{" "}
             </p>
 
-            <div className="mt-6 space-y-3">
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Restaurant name"
-                className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"
-              />
-            </div>
-
-            <button
-              onClick={addRestaurant}
-              disabled={!memberId || !name.trim()}
-              className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
-            >
-              Add Nomination +
-            </button>
+            <RestaurantSearch
+              center={center}
+              disabled={!memberId}
+              nominatedPlaceIds={nominatedPlaceIds}
+              onAddPlace={addPlace}
+              onAddName={addRestaurant}
+            />
 
             {!memberId && (
               <p className="mt-3 text-xs text-[#9C5A49]">
@@ -227,25 +264,11 @@ export default function Nominations({ roomId }: { roomId: string }) {
 
             <div className="mt-8 grid gap-5 md:grid-cols-2">
               {restaurants.map((restaurant) => (
-                <div
+                <RestaurantCard
                   key={restaurant.id}
-                  className="border border-[#343329]/20 bg-white/20 p-6"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <h3 className="font-serif text-3xl">{restaurant.name}</h3>
-                    <span className="text-xs uppercase tracking-[0.15em] text-[#68665A]">
-                      {restaurant.priceLabel}
-                    </span>
-                  </div>
-                  <p className="mt-3 text-sm text-[#68665A]">
-                    {restaurant.cuisine} · {restaurant.distanceMiles.toFixed(1)}{" "}
-                    mi
-                  </p>
-                  <p className="mt-2 text-xs text-[#777466]">
-                    ⭐ {restaurant.rating.toFixed(1)} ({restaurant.reviewCount}{" "}
-                    ratings)
-                  </p>
-                </div>
+                  restaurant={restaurant}
+                  dietaryNeeds={dietaryNeeds}
+                />
               ))}
             </div>
           </div>

@@ -12,6 +12,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
+import { isDietaryTag, type DietaryTag } from "../lib/dietary";
 
 type PriceLevel =
   | "PRICE_LEVEL_FREE"
@@ -30,6 +31,7 @@ export type PreferenceInput = {
   budgetRanges?: BudgetRange[];
   favorites?: string[];
   readyToVote?: boolean;
+  dietaryNeeds?: DietaryTag[];
 };
 
 type Preference = {
@@ -37,6 +39,7 @@ type Preference = {
   budgetRanges: BudgetRange[];
   favorites: string[];
   readyToVote?: boolean;
+  dietaryNeeds: DietaryTag[];
 };
 
 export type Restaurant = {
@@ -46,9 +49,37 @@ export type Restaurant = {
   priceLevel?: PriceLevel;
   budgetRange: BudgetRange;
   priceLabel: string;
-  distanceMiles: number;
+  distanceMiles: number | null;
   rating: number;
   reviewCount: number;
+  // only set for restaurants picked from Google Places search
+  placeId?: string;
+  address?: string;
+  photoName?: string;
+  mapsUrl?: string;
+  website?: string;
+  // from Yelp categories; dietaryChecked is false when the restaurant wasn't found on Yelp
+  dietaryTags?: DietaryTag[];
+  dietaryChecked?: boolean;
+  yelpUrl?: string;
+};
+
+// A Google Places restaurant (plus its Yelp dietary lookup) as it comes from the search box.
+export type NominatedPlace = {
+  placeId: string;
+  name: string;
+  cuisine: string;
+  address: string;
+  priceLevel: string | null;
+  distanceMiles: number | null;
+  rating: number | null;
+  userRatingCount: number | null;
+  photoName: string | null;
+  mapsUrl: string;
+  website: string;
+  dietaryTags: DietaryTag[];
+  dietaryChecked: boolean;
+  yelpUrl: string;
 };
 
 type PlacesApiRestaurant = {
@@ -272,6 +303,10 @@ function toBudgetRanges(value: unknown): BudgetRange[] | undefined {
   });
 }
 
+function isPriceLevel(value: unknown): value is PriceLevel {
+  return typeof value === "string" && value in priceLevelToBudgetRange;
+}
+
 function passesBudgetRanges(
   restaurant: Restaurant,
   preferences: Preference[],
@@ -280,6 +315,26 @@ function passesBudgetRanges(
     pref.budgetRanges.length === 0 ||
     pref.budgetRanges.includes(restaurant.budgetRange),
   );
+}
+
+// Yelp categories only say what a restaurant is known for, so a missing tag means "unknown",
+// not "doesn't accommodate". false = keep unknown restaurants (labeled in the UI),
+// true = drop them. This is the switch for the keep-vs-prune A/B test.
+export const PRUNE_UNKNOWN_DIETARY = false;
+
+export function passesDietaryNeeds(
+  restaurant: Restaurant,
+  preferences: Preference[],
+  pruneUnknown = PRUNE_UNKNOWN_DIETARY,
+): boolean {
+  if (!pruneUnknown) return true;
+  const tags = restaurant.dietaryTags ?? [];
+  return preferences.every((pref) => pref.dietaryNeeds.every((need) => tags.includes(need)));
+}
+
+// Every dietary need anyone in the group selected, for labeling restaurant cards.
+export function groupDietaryNeeds(preferences: Preference[]): DietaryTag[] {
+  return Array.from(new Set(preferences.flatMap((pref) => pref.dietaryNeeds)));
 }
 
 export async function createGroup(
@@ -358,6 +413,9 @@ export async function submitPreferences(
         typeof input.readyToVote === "boolean"
           ? input.readyToVote
           : existingReadyToVote,
+      ...(input.dietaryNeeds
+        ? { dietaryNeeds: input.dietaryNeeds.filter(isDietaryTag) }
+        : {}),
       updatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -379,6 +437,52 @@ export async function submitPreferences(
         { merge: true },
       ),
     ),
+  );
+}
+
+// Saves a restaurant picked from Google Places search with its real details.
+// Typed-in names still go through submitPreferences / resolveRestaurant.
+export async function nominatePlace(
+  roomId: string,
+  memberId: string,
+  place: NominatedPlace,
+) {
+  const priceLevel = isPriceLevel(place.priceLevel) ? place.priceLevel : undefined;
+  // unknown prices default to $10-$30 for pruning until we decide keep-vs-prune
+  const budgetRange = priceLevel
+    ? priceLevelToBudgetRange[priceLevel]
+    : "TEN_TO_THIRTY";
+
+  // Firestore rejects undefined values, so optional fields are only added when present
+  await setDoc(
+    doc(db, "rooms", roomId, "restaurants", `place-${place.placeId}`),
+    {
+      name: place.name,
+      cuisine: place.cuisine,
+      placeId: place.placeId,
+      address: place.address,
+      budgetRange,
+      priceLabel: priceLevel ? budgetRangeLabels[budgetRange] : "Price unknown",
+      ...(priceLevel ? { priceLevel } : {}),
+      ...(place.distanceMiles !== null ? { distanceMiles: place.distanceMiles } : {}),
+      rating: place.rating ?? 0,
+      reviewCount: place.userRatingCount ?? 0,
+      ...(place.photoName ? { photoName: place.photoName } : {}),
+      mapsUrl: place.mapsUrl,
+      website: place.website,
+      dietaryTags: place.dietaryTags.filter(isDietaryTag),
+      dietaryChecked: place.dietaryChecked,
+      yelpUrl: place.yelpUrl,
+      nominatedByMemberIds: arrayUnion(memberId),
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+
+  await setDoc(
+    doc(db, "rooms", roomId, "preferences", memberId),
+    { favorites: arrayUnion(place.name), updatedAt: serverTimestamp() },
+    { merge: true },
   );
 }
 
@@ -453,6 +557,7 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
       [...ALL_BUDGET_RANGES],
     favorites: dedupeNames((item.get("favorites") as string[] | undefined) || []),
     readyToVote: Boolean(item.get("readyToVote")),
+    dietaryNeeds: ((item.get("dietaryNeeds") as unknown[] | undefined) || []).filter(isDietaryTag),
   }));
 
   const members = memberSnap.docs.map((item) => ({
@@ -479,9 +584,17 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
       priceLabel:
         (item.get("priceLabel") as string | undefined) ||
         budgetRangeLabels[budgetRange],
-      distanceMiles: (item.get("distanceMiles") as number | undefined) ?? 1,
+      distanceMiles: (item.get("distanceMiles") as number | undefined) ?? null,
       rating: (item.get("rating") as number | undefined) ?? 4,
       reviewCount: (item.get("reviewCount") as number | undefined) ?? 0,
+      placeId: item.get("placeId") as string | undefined,
+      address: item.get("address") as string | undefined,
+      photoName: item.get("photoName") as string | undefined,
+      mapsUrl: item.get("mapsUrl") as string | undefined,
+      website: item.get("website") as string | undefined,
+      dietaryTags: ((item.get("dietaryTags") as unknown[] | undefined) || []).filter(isDietaryTag),
+      dietaryChecked: Boolean(item.get("dietaryChecked")),
+      yelpUrl: item.get("yelpUrl") as string | undefined,
     };
   });
 
@@ -496,7 +609,8 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
   const sourceRestaurants = allRestaurants.length ? allRestaurants : fallbackRestaurants;
 
   const options = sourceRestaurants.filter((restaurant) =>
-    passesBudgetRanges(restaurant, preferences),
+    passesBudgetRanges(restaurant, preferences) &&
+    passesDietaryNeeds(restaurant, preferences),
   );
 
   const voteCount = new Map<string, number>();

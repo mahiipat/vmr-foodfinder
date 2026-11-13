@@ -2,10 +2,12 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  groupDietaryNeeds,
   subscribeRoomState,
   type RoomState,
 } from "../../../../backend/AppBackend";
 import { trackEvent, trackScreen } from "../../../../lib/analytics";
+import RestaurantCard from "../../../components/restaurantCard";
 
 export default function Results({ roomId }: { roomId: string }) {
   const router = useRouter();
@@ -30,6 +32,7 @@ export default function Results({ roomId }: { roomId: string }) {
     (memberId) => (state?.votesByMember[memberId] || []).length > 0,
   ).length;
   const winner = state?.hasTie ? null : state?.winner || null;
+  const dietaryNeeds = groupDietaryNeeds(state?.preferences || []);
 
   if (!loaded)
     return <main className="min-h-screen bg-[#F0EADF] p-10">Loading...</main>;
@@ -81,7 +84,7 @@ export default function Results({ roomId }: { roomId: string }) {
           </section>
         )}
 
-        <section className="relative z-10 mx-auto mt-16 max-w-3xl px-8 pb-16 text-center">
+        <section className="relative z-10 mx-auto mt-16 max-w-4xl px-8 pb-16 text-center">
           <div className="border-y border-[#343329]/30 py-14">
             {totalVotes === 0 ? (
               <>
@@ -97,15 +100,18 @@ export default function Results({ roomId }: { roomId: string }) {
                   {" "}
                   Currently in the lead{" "}
                 </p>
-                <h2 className="mt-6 font-serif text-5xl sm:text-7xl">
-                  {winner.name}
-                </h2>
-                <p className="mt-5 text-sm text-[#68665A]">
-                  {winner.cuisine} · {winner.priceLabel}
-                </p>
-                <p className="mt-3 text-xs text-[#777466]">
-                  {winner.votes} {winner.votes === 1 ? "vote" : "votes"}
-                </p>
+                <div className="mt-8">
+                  <RestaurantCard
+                    restaurant={winner}
+                    size="large"
+                    dietaryNeeds={dietaryNeeds}
+                    footer={
+                      <p className="mt-5 text-xs uppercase tracking-[0.2em] text-[#777466]">
+                        {winner.votes} {winner.votes === 1 ? "vote" : "votes"}
+                      </p>
+                    }
+                  />
+                </div>
               </>
             ) : (
               <>
@@ -125,7 +131,7 @@ export default function Results({ roomId }: { roomId: string }) {
           </div>
         </section>
 
-        <section className="relative z-10 mx-auto max-w-3xl px-8 pb-24">
+        <section className="relative z-10 mx-auto max-w-4xl px-8 pb-24">
           <div className="flex items-center justify-between">
             <h3 className="font-serif text-4xl"> The full results. </h3>
             <span className="text-xs text-[#777466]">
@@ -139,32 +145,30 @@ export default function Results({ roomId }: { roomId: string }) {
             </p>
           )}
 
-          <div className="mt-8 space-y-8">
+          <div className="mt-8 grid gap-5 sm:grid-cols-2">
             {rankings.map((restaurant, index) => (
-              <div key={restaurant.id}>
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="font-serif text-2xl">
-                      {String(index + 1).padStart(2, "0")} / {restaurant.name}
+              <RestaurantCard
+                key={restaurant.id}
+                restaurant={restaurant}
+                rank={index + 1}
+                dietaryNeeds={dietaryNeeds}
+                footer={
+                  <div className="mt-5">
+                    <p className="text-right text-sm">
+                      {restaurant.votes}{" "}
+                      {restaurant.votes === 1 ? "vote" : "votes"}
                     </p>
-                    <p className="mt-2 text-xs text-[#777466]">
-                      {restaurant.priceLabel} · {restaurant.cuisine}
-                    </p>
+                    <div className="mt-2 h-2 w-full bg-[#343329]/10">
+                      <div
+                        className="h-full bg-[#747A60] transition-all"
+                        style={{
+                          width: `${totalVotes ? (restaurant.votes / totalVotes) * 100 : 0}%`,
+                        }}
+                      ></div>
+                    </div>
                   </div>
-                  <span className="text-sm">
-                    {restaurant.votes}{" "}
-                    {restaurant.votes === 1 ? "vote" : "votes"}
-                  </span>
-                </div>
-                <div className="mt-3 h-2 w-full bg-[#343329]/10">
-                  <div
-                    className="h-full bg-[#747A60] transition-all"
-                    style={{
-                      width: `${totalVotes ? (restaurant.votes / totalVotes) * 100 : 0}%`,
-                    }}
-                  ></div>
-                </div>
-              </div>
+                }
+              />
             ))}
           </div>
 
