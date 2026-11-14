@@ -6,10 +6,12 @@ import {
   budgetRangeLabels,
   markMemberReadyForVoting,
   removeNomination,
+  restaurantNameKey,
   submitPreferences,
   subscribeRoomState,
   userErrorMessage,
   type BudgetRange,
+  type Restaurant,
   type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
@@ -24,6 +26,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState("");
+  const [searchResults, setSearchResults] = useState<Restaurant[]>([]);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -79,11 +83,34 @@ export default function Nominations({ roomId }: { roomId: string }) {
     await saveBudgetRanges(nextRanges);
   }
 
-  async function addRestaurant() {
-    const restaurantName = name.trim();
+  async function searchRestaurants(searchTerm = name) {
+    const query = searchTerm.trim();
+    const location = typeof state?.room.location === "string" ? state.room.location : "";
+    if (!query || !location || searching || saving) return;
+    setSearching(true);
+    setSearchResults([]);
+    setError("");
+    try {
+      const params = new URLSearchParams({ query, location });
+      const response = await fetch(`/api/restaurants/search?${params}`);
+      const data = await response.json() as { restaurants?: Restaurant[]; error?: string };
+      if (!response.ok) throw new Error(data.error || "Restaurant search failed. Please try again.");
+      const results = Array.isArray(data.restaurants) ? data.restaurants : [];
+      setSearchResults(results);
+      if (results.length === 0) setError("No matching restaurants found. Try a more specific name.");
+    } catch (error) {
+      setError(userErrorMessage(error, "Restaurant search failed. Please try again."));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function addRestaurant(restaurant?: Restaurant) {
+    const restaurantName = restaurant?.name.trim() || name.trim();
     if (!memberId || !restaurantName || saving) return;
     const current = myPreference?.favorites ?? [];
-    if (current.some((favorite) => favorite.toLowerCase() === restaurantName.toLowerCase())) {
+    const alreadyNominated = current.some((favorite) => restaurantNameKey(favorite) === restaurantNameKey(restaurantName));
+    if (alreadyNominated && !restaurant) {
       setError("You've already nominated this restaurant.");
       return;
     }
@@ -91,11 +118,13 @@ export default function Nominations({ roomId }: { roomId: string }) {
     setError("");
     try {
       const result = await submitPreferences(roomId, memberId, {
-        favorites: [...current, restaurantName],
+        favorites: alreadyNominated ? current : [...current, restaurantName],
+        restaurants: restaurant ? [restaurant] : [],
         budgetRanges: selectedBudgetRanges,
       });
       setState(result.state);
       setName("");
+      setSearchResults([]);
       void trackEvent("restaurant_nominated");
     } catch (error) {
       console.error(error);
@@ -230,21 +259,79 @@ export default function Nominations({ roomId }: { roomId: string }) {
               Nominating as {memberName || "Guest"}.{" "}
             </p>
 
-            <div className="mt-6 space-y-3">
+            <form
+              id="restaurant-search"
+              className="mt-6 flex flex-col gap-3 sm:flex-row"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void searchRestaurants();
+              }}
+            >
               <input
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setSearchResults([]);
+                }}
                 placeholder="Restaurant name"
+                aria-label="Restaurant name"
                 className="w-full border-b border-[#343329]/30 bg-transparent px-2 py-3 outline-none"
               />
-            </div>
+              <button
+                type="submit"
+                disabled={!memberId || !name.trim() || searching || saving || waiting}
+                className="rounded-full bg-[#343329] px-8 py-3 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
+              >
+                {searching ? "Searching..." : "Search"}
+              </button>
+            </form>
+
+            <p className="mt-2 text-xs text-[#777466]">
+              Searching near {typeof state?.room.location === "string" ? state.room.location : "your group"}.
+            </p>
+
+            {searchResults.length > 0 && (
+              <div className="mt-4 space-y-3">
+                {searchResults.map((restaurant) => (
+                  <div key={restaurant.id} className="border border-[#343329]/20 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-serif text-xl">{restaurant.name}</p>
+                        <p className="mt-1 text-xs text-[#68665A]">
+                          {restaurant.cuisine} · {restaurant.priceLabel}
+                        </p>
+                        {restaurant.address && (
+                          <p className="mt-1 text-xs text-[#777466]">{restaurant.address}</p>
+                        )}
+                        {restaurant.reviewCount > 0 && (
+                          <p className="mt-1 text-xs text-[#777466]">
+                            ⭐ {restaurant.rating.toFixed(1)} ({restaurant.reviewCount} ratings)
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void addRestaurant(restaurant)}
+                        disabled={!memberId || saving || waiting}
+                        className="shrink-0 text-xs text-[#9C5A49] hover:underline disabled:opacity-40"
+                      >
+                        {saving ? "Adding..." : myPreference?.favorites.some(
+                          (favorite) => restaurantNameKey(favorite) === restaurantNameKey(restaurant.name),
+                        ) ? "Update" : "Add"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <button
+              type="button"
               onClick={() => void addRestaurant()}
               disabled={!memberId || !name.trim() || saving || waiting}
-              className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
+              className="mt-4 text-xs text-[#777466] underline disabled:opacity-40"
             >
-              Add Nomination +
+              Can&apos;t find it? Add name without details
             </button>
 
             {(error || state?.reaskReason) && (
@@ -291,12 +378,28 @@ export default function Nominations({ roomId }: { roomId: string }) {
                   <p className="mt-3 text-sm text-[#68665A]">
                     {restaurant.cuisine} · {restaurant.distanceMiles === null ? "Distance unavailable" : `${restaurant.distanceMiles.toFixed(1)} mi`}
                   </p>
+                  {restaurant.address && (
+                    <p className="mt-2 text-xs text-[#777466]">{restaurant.address}</p>
+                  )}
+                  {restaurant.id.startsWith("nomination-") && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setName(restaurant.name);
+                        void searchRestaurants(restaurant.name);
+                        document.getElementById("restaurant-search")?.scrollIntoView({ behavior: "smooth", block: "center" });
+                      }}
+                      disabled={searching || saving || waiting}
+                      className="absolute bottom-4 left-6 text-xs text-[#68665A] underline disabled:opacity-40"
+                    >
+                      Find details
+                    </button>
+                  )}
                   <p className="mt-2 text-xs text-[#777466]">
                     {restaurant.reviewCount > 0 ? `⭐ ${restaurant.rating.toFixed(1)} (${restaurant.reviewCount} ratings)` : "No ratings available"}
                   </p>
                   {myPreference?.favorites.some(
-                    (favorite) =>
-                      favorite.toLowerCase() === restaurant.name.toLowerCase()
+                    (favorite) => restaurantNameKey(favorite) === restaurantNameKey(restaurant.name)
                   ) && (
                     <button
                       type="button"

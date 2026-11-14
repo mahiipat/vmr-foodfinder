@@ -13,10 +13,10 @@ export type TieStrategy = "random" | "runoff";
 export type Restaurant = {
   id: string; name: string; cuisine: string; budgetRange: BudgetRange | null;
   priceLevel?: string; priceLabel: string; distanceMiles: number | null;
-  rating: number; reviewCount: number; lat?: number; lng?: number;
+  rating: number; reviewCount: number; lat?: number; lng?: number; address?: string;
 };
 export type PreferenceInput = {
-  budgetRanges?: BudgetRange[]; favorites?: string[]; readyToVote?: boolean;
+  budgetRanges?: BudgetRange[]; favorites?: string[]; restaurants?: Restaurant[]; readyToVote?: boolean;
   distanceCapMiles?: number | null; hostLocation?: HostLocation | null;
 };
 export type Preference = {
@@ -54,12 +54,16 @@ export function text(value: unknown, field: string, max = 200): string {
   }
   return value.trim();
 }
+export function restaurantNameKey(value: string): string {
+  const key = value.normalize("NFKD").toLowerCase().replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+  return key || value.trim().toLowerCase();
+}
 export function names(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 30) throw new RoomError("Provide at most 30 favorites.");
   const unique = new Map<string, string>();
   for (const item of value) {
     const name = text(item, "restaurant name");
-    unique.set(name.toLowerCase(), name);
+    unique.set(restaurantNameKey(name), name);
   }
   return [...unique.values()];
 }
@@ -141,15 +145,15 @@ export function updatePreferences(group: GroupData, uid: string, input: Preferen
     group.reaskReason = null;
   }
   // Remove only records no member still nominates (shared nominations survive).
-  const active = new Set(Object.values(group.preferences).flatMap((p) => p.favorites.map((n) => n.toLowerCase())));
+  const active = new Set(Object.values(group.preferences).flatMap((p) => p.favorites.map(restaurantNameKey)));
   for (const [key, restaurant] of Object.entries(group.restaurants)) {
-    if (!active.has(restaurant.name.toLowerCase())) delete group.restaurants[key];
+    if (!active.has(restaurantNameKey(restaurant.name))) delete group.restaurants[key];
   }
 }
 export function eligibleRestaurants(group: GroupData): Restaurant[] {
   const preferences = Object.values(group.preferences);
-  const active = new Set(preferences.flatMap((p) => p.favorites.map((n) => n.toLowerCase())));
-  return Object.values(group.restaurants).filter((restaurant) => active.has(restaurant.name.toLowerCase()) &&
+  const active = new Set(preferences.flatMap((p) => p.favorites.map(restaurantNameKey)));
+  return Object.values(group.restaurants).filter((restaurant) => active.has(restaurantNameKey(restaurant.name)) &&
     preferences.every((preference) => restaurant.budgetRange === null
       ? ALL_BUDGET_RANGES.every((range) => preference.budgetRanges.includes(range))
       : preference.budgetRanges.includes(restaurant.budgetRange)));
@@ -213,7 +217,7 @@ export function roomView(group: GroupData, roomId: string, uid: string): RoomSta
   const mine = member ? group.preferences[uid] : undefined;
   const revealed = member && group.phase !== "nominations";
   const source = revealed ? group.candidateIds.map((id) => group.restaurants[id]) :
-    member ? Object.values(group.restaurants).filter((r) => mine?.favorites.some((name) => name.toLowerCase() === r.name.toLowerCase())) : [];
+    member ? Object.values(group.restaurants).filter((r) => mine?.favorites.some((name) => restaurantNameKey(name) === restaurantNameKey(r.name))) : [];
   const tally = tallyVotes(group);
   const options = source.map((r) => ({ ...r,
     distanceMiles: coordinates(mine?.hostLocation ?? null) && coordinates(r) ?
@@ -422,9 +426,18 @@ export function createNomination(name: string): Restaurant {
   return { id: `nomination-${trimmed.toLowerCase()}`, name: trimmed, cuisine: "Restaurant",
     budgetRange: null, priceLabel: "Price unavailable", distanceMiles: null, rating: 0, reviewCount: 0 };
 }
-function prepareNominations(group: GroupData, favorites: string[]): string[] {
+function prepareNominations(group: GroupData, favorites: string[], selectedRestaurants: Restaurant[] = []): string[] {
+  const selectedByName = new Map(selectedRestaurants.map((restaurant) => [restaurantNameKey(restaurant.name), restaurant]));
   return names(favorites).map((name) => {
-    const restaurant = Object.values(group.restaurants).find((item) => item.name.toLowerCase() === name.toLowerCase()) ?? createNomination(name);
+    const nameKey = restaurantNameKey(name);
+    const restaurant = selectedByName.get(nameKey) ??
+      Object.values(group.restaurants).find((item) => restaurantNameKey(item.name) === nameKey) ??
+      createNomination(name);
+    for (const [id, existing] of Object.entries(group.restaurants)) {
+      if (restaurantNameKey(existing.name) === nameKey && id !== restaurant.id) {
+        delete group.restaurants[id];
+      }
+    }
     group.restaurants[restaurant.id] = restaurant;
     return restaurant.name;
   });
@@ -475,7 +488,7 @@ async function changeRoom(roomId: string, memberId: string | undefined, change: 
 export function submitPreferences(roomId: string, memberId: string, input: PreferenceInput) {
   return changeRoom(roomId, memberId, (group, uid) => {
     const next = { ...input };
-    if (next.favorites !== undefined) next.favorites = prepareNominations(group, next.favorites);
+    if (next.favorites !== undefined) next.favorites = prepareNominations(group, next.favorites, next.restaurants);
     if (next.hostLocation !== undefined) next.hostLocation = locationInput(next.hostLocation);
     updatePreferences(group, uid, next);
     if (next.readyToVote !== undefined) markReady(group, uid, next.readyToVote);
@@ -499,7 +512,7 @@ export function submitVotes(roomId: string, memberId: string, restaurantIds: str
 }
 export function removeNomination(roomId: string, memberId: string, name: string) {
   return changeRoom(roomId, memberId, (group, uid) => updatePreferences(group, uid, {
-    favorites: group.preferences[uid].favorites.filter((favorite) => favorite.toLowerCase() !== name.toLowerCase()),
+    favorites: group.preferences[uid].favorites.filter((favorite) => restaurantNameKey(favorite) !== restaurantNameKey(name)),
   }));
 }
 export function submitResultFeedback(roomId: string, memberId: string, happy: boolean) {

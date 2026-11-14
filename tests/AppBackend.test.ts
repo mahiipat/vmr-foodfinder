@@ -58,6 +58,34 @@ test("direct writes preserve shared nominations and reset readiness when prefere
   assert.ok(!Object.values((f.store.get(`rooms/${f.roomId}`) as GroupData).restaurants).some((r) => r.name === "Alpha"));
 });
 
+test("selected restaurant details replace a previous name-only nomination", async () => {
+  const f = await setup();
+  await f.backend.submitPreferences(f.roomId, "one", { favorites: ["jimmy johns"] });
+  const selected = {
+    id: "google-place-123",
+    name: "Jimmy John's",
+    cuisine: "Sandwich shop",
+    budgetRange: null,
+    priceLevel: "PRICE_LEVEL_INEXPENSIVE",
+    priceLabel: "$",
+    distanceMiles: null,
+    rating: 4.2,
+    reviewCount: 1200,
+    lat: 33.75,
+    lng: -84.39,
+    address: "1 Main Street, Atlanta, GA",
+  };
+  await f.backend.submitPreferences(f.roomId, "one", {
+    favorites: ["Jimmy John's"],
+    restaurants: [selected],
+  });
+
+  const state = await f.backend.getRoomState(f.roomId);
+  assert.equal(state?.options.length, 1);
+  assert.deepEqual(state?.options[0], { ...selected, votes: 0 });
+  assert.equal(Object.keys((f.store.get(`rooms/${f.roomId}`) as GroupData).restaurants).length, 1);
+});
+
 test("registered profiles prefill new membership without overwriting later group edits", async () => {
   const f = await setup(); f.asMember("account"); f.auth.currentUser!.isAnonymous = false;
   await f.backend.saveProfile({ ...f.backend.defaultProfile("Account"), favorites: ["Saved favorite"] });
