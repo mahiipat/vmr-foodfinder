@@ -2,8 +2,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { joinGroup, subscribeRoomState } from "../../../backend/AppBackend";
+import { joinGroup, submitPreferences, updateMemberDistance, subscribeRoomState } from "../../../backend/AppBackend";
 import { getMemberSession, setMemberSession } from "../../../lib/foodfinder";
+import { onAuthStateChanged, type User } from "firebase/auth";
+import { auth, db } from "../../../backend/firebase";
+import { doc, getDoc } from "firebase/firestore";
+import { getAccountPreferences } from "../../../lib/accountPreferences";
 import { trackEvent, trackScreen } from "../../../lib/analytics";
 
 export default function GroupRoom({ roomId }: { roomId: string }) {
@@ -12,6 +16,16 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
     const [members, setMembers] = useState<Array<{ id: string; name: string }>>([]);
     const [currentMember, setCurrentMember] = useState(() => getMemberSession(roomId)?.name || "");
     const [copied, setCopied] = useState(false);
+    const [user, setUser] = useState<User | null>(null);
+    const [authReady, setAuthReady] = useState(false);
+    const [joining, setJoining] = useState(false);
+    const [joinError, setJoinError] = useState("");
+
+    useEffect(() => onAuthStateChanged(auth, (next) => { setUser(next); setAuthReady(true);
+        if (!next && getMemberSession(roomId)?.memberId.startsWith("user_")) {
+            sessionStorage.removeItem(`foodfinder-member-${roomId}`);
+            setCurrentMember("");
+        } }), []);
 
     useEffect(() => {
         void trackScreen("group_room");
@@ -25,9 +39,41 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
         return () => stop();
     }, [roomId]);
 
+    useEffect(() => {
+        if (!authReady || !user) return;
+        let cancelled = false;
+        async function joinSignedInUser() {
+            setJoining(true);
+            setJoinError("");
+            try {
+                const current = auth.currentUser;
+                if (!current) return;
+                const memberId = `user_${current.uid}`;
+                const roomMemberAlreadyExists = (await getDoc(doc(db, "rooms", roomId, "members", memberId))).exists();
+                const displayName = current.displayName?.trim() || current.email?.split("@")[0] || "Member";
+                if (!roomMemberAlreadyExists) {
+                    const defaults = await getAccountPreferences(current.uid);
+                    await joinGroup(roomId, displayName, memberId);
+                    await submitPreferences(roomId, memberId, { budgetRanges: defaults.budgetRanges });
+                    await updateMemberDistance(roomId, memberId, { distanceCapMiles: defaults.distanceCapMiles, location: null });
+                }
+                if (!cancelled) {
+                    setMemberSession(roomId, { memberId, name: displayName });
+                    setCurrentMember(displayName);
+                }
+            } catch (error) {
+                if (!cancelled) setJoinError(error instanceof Error ? error.message : "Unable to join this room.");
+            } finally {
+                if (!cancelled) setJoining(false);
+            }
+        }
+        void joinSignedInUser();
+        return () => { cancelled = true; };
+    }, [roomId, authReady, user?.uid]);
+
     async function handleJoinGroup() {
         const trimmed = name.trim();
-        if (!trimmed) return;
+        if (!trimmed || user) return;
 
         const existing = getMemberSession(roomId);
         const { memberId } = await joinGroup(roomId, trimmed, existing?.memberId);
@@ -88,20 +134,22 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                     <div className="border-t border-[#343329]/25 pt-8">
                         <p className="mb-4 text-[10px] uppercase tracking-[0.3em] text-[#777466]"> 01 / Join the table </p>
                         <h2 className="font-serif text-4xl"> Make yourself at home. </h2>
-                        <p className="mt-3 text-sm leading-6 text-[#68665A]"> Enter your name to join the group. No account required. </p>
+                        <p className="mt-3 text-sm leading-6 text-[#68665A]"> {user ? "Your account joins automatically, with your saved preferences." : "Enter your name to join the group. No account required."} </p>
 
-                        <input
+                        {authReady && !user && <input
                             type="text"
                             placeholder="Your name"
                             value={name}
                             onChange={(e) => setName(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") handleJoinGroup(); }}
                             className="mt-7 w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
-                        />
+                        />}
 
-                        <button onClick={handleJoinGroup} disabled={!name.trim()} className="mt-6 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
+                        {authReady && !user && <button onClick={handleJoinGroup} disabled={!name.trim()} className="mt-6 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
                             Join Group →
-                        </button>
+                        </button>}
+                        {joining && <p className="mt-4 text-xs text-[#68665A]">Joining with your account...</p>}
+                        {joinError && <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{joinError}</p>}
                         {currentMember && (
                             <p className="mt-4 text-center text-xs text-[#68665A]">
                                 ✓ You&apos;re joining as {currentMember}
@@ -141,7 +189,7 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
                             Time to nominate your favorite restaurants and discover where everyone wants to eat.
                         </p>
 
-                        <button onClick={() => { void trackEvent("nominations_started"); router.push(`/room/${roomId}/nominations`); }} disabled={!currentMember} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
+                        <button onClick={() => { void trackEvent("nominations_started"); router.push(`/room/${roomId}/nominations`); }} disabled={!currentMember || joining || Boolean(joinError)} className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40">
                             Continue to Nominations →
                         </button>
                     </div>

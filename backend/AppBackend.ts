@@ -10,6 +10,7 @@ import {
   Unsubscribe,
   arrayUnion,
   writeBatch,
+  runTransaction,
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -32,11 +33,17 @@ export type PreferenceInput = {
   readyToVote?: boolean;
 };
 
+export type MemberDistance = {
+  location: HostLocation | null;
+  distanceCapMiles: number | null;
+};
+
 type Preference = {
   memberId: string;
   budgetRanges: BudgetRange[];
   favorites: string[];
   readyToVote?: boolean;
+  memberDistance?: MemberDistance;
 };
 
 export type Restaurant = {
@@ -67,6 +74,7 @@ export type RoomState = {
   room: Record<string, unknown>;
   members: Array<{ id: string; name: string }>;
   preferences: Preference[];
+  memberDistances: Record<string, MemberDistance>;
   options: Array<Restaurant & { votes: number }>;
   winner: (Restaurant & { votes: number }) | null;
   votesByMember: Record<string, string[]>;
@@ -76,6 +84,16 @@ export type RoomState = {
   hasTie: boolean;
   distanceCapMiles: number | null;
   hostLocation: { lat?: number; lng?: number; address?: string } | null;
+  tieMode: "random" | "runoff" | null;
+  tieWinnerId: string | null;
+  runoffRoundId: string | null;
+  runoffOptionIds: string[];
+  runoffVotesByMember: Record<string, string>;
+  runoffRankings: Array<Restaurant & { votes: number }>;
+  runoffAllMembersVoted: boolean;
+  runoffHasTie: boolean;
+  runoffWinner: (Restaurant & { votes: number }) | null;
+  satisfactionByMember: Record<string, boolean>;
 };
 
 export const ALL_BUDGET_RANGES: BudgetRange[] = [
@@ -195,7 +213,6 @@ function resolveRestaurant(nameOrId: string): Restaurant {
   if (exact) {
     return exact;
   }
-  // this needs to be done so that type script can be happy
 
   return {
     id: restaurantDocId(nameOrId),
@@ -308,19 +325,12 @@ export async function joinGroup(
 ) {
   const roomRef = doc(db, "rooms", roomId);
   const roomSnap = await getDoc(roomRef);
-
-  if (!roomSnap.exists()) {
-    await setDoc(roomRef, {
-      groupName: "Untitled Group",
-      location: "Unknown",
-      createdAt: serverTimestamp(),
-    });
-  }
+  if (!roomSnap.exists()) throw new Error("Room not found. Check the room code.");
 
   await setDoc(doc(db, "rooms", roomId, "members", memberId), {
     name,
     joinedAt: serverTimestamp(),
-  });
+  }, { merge: true });
 
   return { memberId };
 }
@@ -336,8 +346,7 @@ export async function submitPreferences(
   const existingFavorites = existingSnap.exists()
     ? ((existingSnap.get("favorites") as string[] | undefined) ?? [])
     : [];
-  // An explicitly supplied favorites array replaces the old list.
-  // Omitting favorites preserves the existing nominations.
+  
   const nextFavorites = input.favorites === undefined
     ? dedupeNames(existingFavorites)
     : dedupeNames(input.favorites);
@@ -389,6 +398,25 @@ export async function submitPreferences(
 
 export type HostLocation = { lat?: number; lng?: number; address?: string };
 
+export async function updateMemberDistance(
+  roomId: string,
+  memberId: string,
+  input: MemberDistance,
+): Promise<void> {
+  if (!memberId) throw new Error("Join the group before saving a location.");
+  const cap = input.distanceCapMiles;
+  if (cap !== null && (!Number.isFinite(cap) || cap <= 0)) {
+    throw new Error("Enter a valid distance greater than zero.");
+  }
+  await setDoc(doc(db, "rooms", roomId, "preferences", memberId), {
+    memberDistance: {
+      location: input.location,
+      distanceCapMiles: cap,
+    },
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+}
+
 export async function updateRoomDistance(
   roomId: string,
   input: { distanceCapMiles: number | null; hostLocation: HostLocation | null },
@@ -414,7 +442,7 @@ export async function markMemberReadyForVoting(
   memberId: string,
   readyToVote = true,
 ) {
-  await submitPreferences(roomId, memberId, { readyToVote, favorites: [] });
+  await submitPreferences(roomId, memberId, { readyToVote });
 }
 
 export async function submitVotes(
@@ -459,14 +487,126 @@ export async function submitVotes(
   await batch.commit();
 }
 
+export async function chooseTieBreaker(
+  roomId: string,
+  mode: "random" | "runoff",
+  candidateIds: string[],
+  expectedRoundId: string | null = null,
+): Promise<void> {
+  const uniqueIds = [...new Set(candidateIds)];
+  if (uniqueIds.length < 2) throw new Error("At least two tied restaurants are required.");
+
+  const roomRef = doc(db, "rooms", roomId);
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(roomRef);
+    if (!snap.exists()) throw new Error("Room not found.");
+    const currentMode = snap.get("tieMode") as string | undefined;
+    const currentRound = (snap.get("runoffRoundId") as string | undefined) || null;
+    if (currentMode && currentRound !== expectedRoundId) {
+      throw new Error("A tie-break decision has already been made. Refresh the page.");
+    }
+    if (currentMode === "random") {
+      throw new Error("A winner has already been selected.");
+    }
+    if (currentMode === "runoff" && expectedRoundId === null) {
+      throw new Error("A runoff has already started.");
+    }
+
+    if (mode === "random") {
+      const winnerId = uniqueIds[Math.floor(Math.random() * uniqueIds.length)];
+      transaction.update(roomRef, {
+        tieMode: "random", tieWinnerId: winnerId,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      transaction.update(roomRef, {
+        tieMode: "runoff", tieWinnerId: null,
+        runoffRoundId: uuid(), runoffOptionIds: uniqueIds,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  });
+}
+
+export async function resetTieBreaker(
+  roomId: string,
+  expectedMode: "random" | "runoff",
+  expectedRoundId: string | null,
+): Promise<void> {
+  const roomRef = doc(db, "rooms", roomId);
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(roomRef);
+    if (!snap.exists()) throw new Error("Room not found.");
+    const mode = snap.get("tieMode") ?? null;
+    const roundId = snap.get("runoffRoundId") ?? null;
+    if (mode !== expectedMode || roundId !== expectedRoundId) {
+      throw new Error("The tie-breaker changed. Please refresh and try again.");
+    }
+    transaction.update(roomRef, {
+      tieMode: null,
+      tieWinnerId: null,
+      runoffRoundId: null,
+      runoffOptionIds: [],
+      updatedAt: serverTimestamp(),
+    });
+  });
+}
+
+export async function submitRunoffVote(
+  roomId: string,
+  roundId: string,
+  memberId: string,
+  restaurantId: string,
+): Promise<void> {
+  const roomRef = doc(db, "rooms", roomId);
+  const voteRef = doc(db, "rooms", roomId, "runoffRounds", roundId, "votes", memberId);
+  await runTransaction(db, async (transaction) => {
+    const room = await transaction.get(roomRef);
+    if (!room.exists() || room.get("tieMode") !== "runoff" || room.get("runoffRoundId") !== roundId) {
+      throw new Error("This runoff is no longer active.");
+    }
+    const ids = room.get("runoffOptionIds") as string[] | undefined;
+    if (!ids?.includes(restaurantId)) throw new Error("Invalid runoff restaurant.");
+    transaction.set(voteRef, { restaurantId, updatedAt: serverTimestamp() });
+  });
+}
+
+export async function submitSatisfaction(
+  roomId: string,
+  memberId: string,
+  winnerId: string,
+  decisionKey: string,
+  happy: boolean,
+): Promise<void> {
+  if (!memberId || !winnerId || !decisionKey) throw new Error("Missing feedback details.");
+  const roomRef = doc(db, "rooms", roomId);
+  const feedbackRef = doc(db, "rooms", roomId, "satisfaction", memberId);
+  await runTransaction(db, async (transaction) => {
+    const room = await transaction.get(roomRef);
+    if (!room.exists()) throw new Error("Room not found.");
+    const mode = room.get("tieMode") as string | undefined;
+    const roundId = (room.get("runoffRoundId") as string | undefined) ?? null;
+    const currentKey = mode === "random"
+      ? `random:${room.get("tieWinnerId")}`
+      : mode === "runoff" ? `runoff:${roundId}` : `original:${winnerId}`;
+    if (currentKey !== decisionKey || (mode === "random" && room.get("tieWinnerId") !== winnerId)) {
+      throw new Error("The final result changed. Refresh and try again.");
+    }
+    transaction.set(feedbackRef, {
+      winnerId, decisionKey, happy, updatedAt: serverTimestamp(),
+    });
+  });
+}
+
 export async function getRoomState(roomId: string): Promise<RoomState | null> {
   const roomRef = doc(db, "rooms", roomId);
-  const [roomSnap, memberSnap, prefSnap, voteSnap, restaurantSnap] = await Promise.all([
+  const [roomSnap, memberSnap, prefSnap, voteSnap, restaurantSnap, satisfactionSnap] = await Promise.all([
     getDoc(roomRef),
     getDocs(collection(db, "rooms", roomId, "members")),
     getDocs(collection(db, "rooms", roomId, "preferences")),
     getDocs(collection(db, "rooms", roomId, "votes")),
     getDocs(collection(db, "rooms", roomId, "restaurants")),
+    getDocs(collection(db, "rooms", roomId, "satisfaction")),
   ]);
 
   if (!roomSnap.exists()) {
@@ -480,6 +620,14 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
       [...ALL_BUDGET_RANGES],
     favorites: dedupeNames((item.get("favorites") as string[] | undefined) || []),
     readyToVote: Boolean(item.get("readyToVote")),
+    memberDistance: (() => {
+      const raw = item.get("memberDistance") as MemberDistance | undefined;
+      return {
+        location: raw?.location ?? null,
+        distanceCapMiles: typeof raw?.distanceCapMiles === "number" && raw.distanceCapMiles > 0
+          ? raw.distanceCapMiles : null,
+      };
+    })(),
   }));
 
   const members = memberSnap.docs.map((item) => ({
@@ -522,8 +670,6 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
     ),
   ).map((name) => resolveRestaurant(name));
 
-  // Only restaurants currently nominated by at least one member are eligible.
-  // This also prevents removed nominations from lingering in the shortlist.
   const activeNames = new Set(preferences.flatMap((pref) => pref.favorites).map(normalize));
   const sourceRestaurants = [
     ...allRestaurants.filter((restaurant) => activeNames.has(normalize(restaurant.name))),
@@ -537,16 +683,27 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
   const rawLocation = roomSnap.get("hostLocation") as HostLocation | null | undefined;
   const hostLocation = rawLocation ?? null;
 
+  const memberDistances: Record<string, MemberDistance> = {};
+  for (const pref of preferences) {
+    memberDistances[pref.memberId] = pref.memberDistance ?? {
+      location: null,
+      distanceCapMiles: null,
+    };
+  }
+
   const options = sourceRestaurants.filter((restaurant) => {
     if (!passesBudgetRanges(restaurant, preferences)) return false;
-    // Apply actual distance filtering only when BOTH coordinates are available.
-    // Mock/fallback distanceMiles values are not location-aware.
-    if (distanceCapMiles !== null &&
-        typeof hostLocation?.lat === "number" && typeof hostLocation?.lng === "number" &&
-        typeof restaurant.lat === "number" && typeof restaurant.lng === "number") {
-      return milesBetween(hostLocation.lat, hostLocation.lng, restaurant.lat, restaurant.lng) <= distanceCapMiles;
-    }
-    return true;
+ 
+    return preferences.every((pref) => {
+      const limit = pref.memberDistance?.distanceCapMiles;
+      if (limit == null) return true;
+      const start = pref.memberDistance?.location;
+      if (typeof start?.lat !== "number" || typeof start.lng !== "number" ||
+          typeof restaurant.lat !== "number" || typeof restaurant.lng !== "number") {
+        return true;
+      }
+      return milesBetween(start.lat, start.lng, restaurant.lat, restaurant.lng) <= limit;
+    });
   });
 
   const voteCount = new Map<string, number>();
@@ -579,10 +736,53 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
   const hasTie =
     ranked.length > 1 && ranked[0].votes > 0 && ranked[0].votes === ranked[1].votes;
 
+  const tieMode = (roomSnap.get("tieMode") as "random" | "runoff" | undefined) ?? null;
+  const tieWinnerId = (roomSnap.get("tieWinnerId") as string | undefined) ?? null;
+  const runoffRoundId = (roomSnap.get("runoffRoundId") as string | undefined) ?? null;
+  const runoffOptionIds = (roomSnap.get("runoffOptionIds") as string[] | undefined) ?? [];
+  const runoffVotesByMember: Record<string, string> = {};
+  if (tieMode === "runoff" && runoffRoundId) {
+    const runoffSnap = await getDocs(collection(db, "rooms", roomId, "runoffRounds", runoffRoundId, "votes"));
+    for (const vote of runoffSnap.docs) {
+      const id = vote.get("restaurantId") as string | undefined;
+      if (id && runoffOptionIds.includes(id)) runoffVotesByMember[vote.id] = id;
+    }
+  }
+  const runoffRankings = ranked.filter((r) => runoffOptionIds.includes(r.id)).map((r) => ({
+    ...r, votes: Object.values(runoffVotesByMember).filter((id) => id === r.id).length,
+  })).sort((a, b) => b.votes - a.votes || b.rating - a.rating);
+  const runoffAllMembersVoted = members.length > 0 &&
+    members.every((member) => Boolean(runoffVotesByMember[member.id]));
+  const runoffHasTie = runoffAllMembersVoted && runoffRankings.length > 1 &&
+    runoffRankings[0].votes === runoffRankings[1].votes;
+  const runoffWinner = runoffAllMembersVoted && !runoffHasTie ? runoffRankings[0] ?? null : null;
+
+  const resolvedWinner = tieMode === "random"
+    ? ranked.find((r) => r.id === tieWinnerId) ?? null
+    : tieMode === "runoff" ? runoffWinner
+    : allMembersVoted && !hasTie ? ranked[0] ?? null : null;
+  const decisionKey = resolvedWinner
+    ? tieMode === "random" ? `random:${tieWinnerId}`
+      : tieMode === "runoff" ? `runoff:${runoffRoundId}`
+      : `original:${resolvedWinner.id}`
+    : null;
+  const satisfactionByMember: Record<string, boolean> = {};
+  if (resolvedWinner && decisionKey) {
+    for (const feedback of satisfactionSnap.docs) {
+      if (feedback.get("winnerId") === resolvedWinner.id &&
+          feedback.get("decisionKey") === decisionKey &&
+          members.some((member) => member.id === feedback.id) &&
+          typeof feedback.get("happy") === "boolean") {
+        satisfactionByMember[feedback.id] = feedback.get("happy") as boolean;
+      }
+    }
+  }
+
   return {
     room: { id: roomSnap.id, ...roomSnap.data() },
     members,
     preferences,
+    memberDistances,
     options: ranked,
     winner: ranked[0] || null,
     votesByMember,
@@ -592,6 +792,9 @@ export async function getRoomState(roomId: string): Promise<RoomState | null> {
     hasTie,
     distanceCapMiles,
     hostLocation,
+    tieMode, tieWinnerId, runoffRoundId, runoffOptionIds,
+    runoffVotesByMember, runoffRankings, runoffAllMembersVoted,
+    runoffHasTie, runoffWinner, satisfactionByMember,
   };
 }
 
@@ -606,6 +809,7 @@ export function subscribeRoomState(
     onSnapshot(collection(db, "rooms", roomId, "preferences"), emit, emitError),
     onSnapshot(collection(db, "rooms", roomId, "restaurants"), emit, emitError),
     onSnapshot(collection(db, "rooms", roomId, "votes"), emit, emitError),
+    onSnapshot(collection(db, "rooms", roomId, "satisfaction"), emit, emitError),
   ];
 
   async function emit() {
@@ -622,6 +826,24 @@ export function subscribeRoomState(
     }
   }
 
+  let watchedRound: string | null = null;
+  let stopRunoff: Unsubscribe | null = null;
+  const originalEmit = emit;
+  const stopRoomRound = onSnapshot(doc(db, "rooms", roomId), (snap) => {
+    const nextRound = (snap.get("runoffRoundId") as string | undefined) ?? null;
+    if (nextRound === watchedRound) return;
+    stopRunoff?.();
+    watchedRound = nextRound;
+    stopRunoff = nextRound
+      ? onSnapshot(collection(db, "rooms", roomId, "runoffRounds", nextRound, "votes"), originalEmit, emitError)
+      : null;
+    void originalEmit();
+  }, emitError);
+
   emit();
-  return () => watchers.forEach((stop) => stop());
+  return () => {
+    watchers.forEach((stop) => stop());
+    stopRoomRound();
+    stopRunoff?.();
+  };
 }

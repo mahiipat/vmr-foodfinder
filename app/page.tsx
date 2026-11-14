@@ -9,10 +9,78 @@ export default function Home() {
     const router = useRouter();
     const [groupName, setGroupName] = useState("");
     const [groupLocation, setGroupLocation] = useState("");
+    const [locationLoading, setLocationLoading] = useState(false);
+    const [locationError, setLocationError] = useState("");
 
     useEffect(() => {
         void trackScreen("home");
     }, []);
+
+    async function useCurrentLocation() {
+        if (!navigator.geolocation) {
+            setLocationError("Your browser does not support location services.");
+            return;
+        }
+
+        setLocationLoading(true);
+        setLocationError("");
+
+        navigator.geolocation.getCurrentPosition(
+            async (position) => {
+                const { latitude, longitude } = position.coords;
+
+                try {
+                    // Convert device coordinates into a city or ZIP code
+                    const response = await fetch(
+                        `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
+                    );
+
+                    if (!response.ok) {
+                        throw new Error("Unable to retrieve location");
+                    }
+
+                    const data = await response.json();
+
+                    const city =
+                        data.address?.city ||
+                        data.address?.town ||
+                        data.address?.village ||
+                        data.address?.municipality ||
+                        data.address?.county;
+
+                    const state = data.address?.state;
+
+                    if (city) {
+                        setGroupLocation(state ? `${city}, ${state}` : city);
+                    } else if (data.address?.postcode) {
+                        setGroupLocation(data.address.postcode);
+                    } else {
+                        setLocationError(
+                            "Couldn't identify your city. Please enter it manually."
+                        );
+                    }
+                } catch (error) {
+                    console.error(error);
+                    setLocationError(
+                        "Unable to identify your location. Please enter it manually."
+                    );
+                } finally {
+                    setLocationLoading(false);
+                }
+            },
+            () => {
+                setLocationLoading(false);
+                setLocationError(
+                    "Location access denied or unavailable. Please enter your city or ZIP code."
+                );
+            },
+            {
+                enableHighAccuracy: false,
+                timeout: 10000,
+                maximumAge: 60000,
+            }
+        );
+    }
 
     async function createGroup() {
         if (!groupName.trim() || !groupLocation.trim()) return;
@@ -30,7 +98,7 @@ export default function Home() {
                 <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/10 px-6 py-6 sm:px-12">
                     <a href="#create" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Create Group </a>
                     <Link href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </Link>
-                    <a href="#about" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> About </a>
+                    <Link href="/login" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Login </Link>
                 </nav>
 
                 <section className="relative z-10 flex flex-col items-center px-6 pt-20 text-center sm:pt-24">
@@ -67,17 +135,57 @@ export default function Home() {
                                 className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
                             />
                             <div className="mt-6">
-                                <input
-                                    type="text"
-                                    placeholder="Group location (City or ZIP code)"
-                                    value={groupLocation}
-                                    onChange={(e) => setGroupLocation(e.target.value)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === "Enter") createGroup();
-                                    }}
-                                    className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
-                                    required
-                                />
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        placeholder="Group location (City or ZIP code)"
+                                        value={groupLocation}
+                                        onChange={(e) => {
+                                            setGroupLocation(e.target.value);
+                                            setLocationError("");
+                                        }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter") createGroup();
+                                        }}
+                                        className="w-full border-b border-[#343329]/40 bg-transparent px-10 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
+                                        required
+                                    />
+
+                                    <button
+                                        type="button"
+                                        onClick={useCurrentLocation}
+                                        disabled={locationLoading}
+                                        title="Use my current location"
+                                        aria-label="Use my current location"
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-[#343329] transition hover:text-[#566B48] disabled:opacity-40"
+                                    >
+                                        {locationLoading ? (
+                                            <span className="block h-4 w-4 animate-spin rounded-full border-2 border-[#566B48] border-t-transparent" />
+                                        ) : (
+                                            <svg
+                                                width="19"
+                                                height="19"
+                                                viewBox="0 0 24 24"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="1.6"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                            >
+                                                <circle cx="12" cy="12" r="3" />
+                                                <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+                                                <circle cx="12" cy="12" r="8" />
+                                            </svg>
+                                        )}
+                                    </button>
+                                </div>
+
+                                {locationError && (
+                                    <p role="alert" className="mt-2 text-xs text-[#9C5A49]">
+                                        {locationError}
+                                    </p>
+                                )}
+
                                 <p className="mt-2 text-xs text-[#777466]">
                                     * Required for matching restaurants near your group.
                                 </p>
