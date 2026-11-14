@@ -115,7 +115,6 @@ export default function Home() {
                     <a href="#create" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Create Group </a>
                     <Link href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </Link>
                     <div className="flex items-center gap-4 text-[10px] font-semibold uppercase tracking-[0.15em]">
-                        <a href="#about">About</a>
                         {account ? (
                             <>
                                 <span>Hi, {account.name}</span>
