@@ -2,7 +2,7 @@
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { createGroup as createGroupRecord } from "../backend/AppBackend";
+import { createGroup as createGroupRecord, logOut, subscribeAccount, userErrorMessage, type Account } from "../backend/AppBackend";
 import { trackEvent, trackScreen } from "../lib/analytics";
 
 export default function Home() {
@@ -11,6 +11,16 @@ export default function Home() {
     const [groupLocation, setGroupLocation] = useState("");
     const [locationLoading, setLocationLoading] = useState(false);
     const [locationError, setLocationError] = useState("");
+    const [error, setError] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [account, setAccount] = useState<Account | null>();
+
+    useEffect(() => subscribeAccount(setAccount), []);
+
+    async function handleLogOut() {
+        try { await logOut(); }
+        catch (error) { setError(userErrorMessage(error, "Unable to log out. Please try again.")); }
+    }
 
     useEffect(() => {
         void trackScreen("home");
@@ -83,11 +93,17 @@ export default function Home() {
     }
 
     async function createGroup() {
-        if (!groupName.trim() || !groupLocation.trim()) return;
-        void trackEvent("group_creation_started");
-        const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
-        void trackEvent("group_created");
-        router.push(`/room/${roomId}`);
+        if (!groupName.trim() || !groupLocation.trim() || saving) return;
+        setSaving(true);
+        setError("");
+        try {
+            void trackEvent("group_creation_started");
+            const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
+            void trackEvent("group_created");
+            router.push(`/room/${roomId}`);
+        } catch (error) {
+            setError(userErrorMessage(error, "Unable to create group. Please try again."));
+        } finally { setSaving(false); }
     }
 
     return (
@@ -95,10 +111,24 @@ export default function Home() {
             <div className="relative mx-auto min-h-[90vh] max-w-7xl overflow-hidden rounded-sm bg-[#F0EADF] shadow-2xl">
                 <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_10%_95%,rgba(231,153,108,0.65),transparent_45%),radial-gradient(ellipse_at_95%_90%,rgba(143,157,112,0.50),transparent_45%)]"></div>
 
-                <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/10 px-6 py-6 sm:px-12">
+                <nav className="relative z-10 flex flex-wrap items-center justify-between gap-4 border-b border-[#343329]/10 px-6 py-6 sm:px-12">
                     <a href="#create" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Create Group </a>
                     <Link href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </Link>
-                    <Link href="/login" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Login </Link>
+                    <div className="flex items-center gap-4 text-[10px] font-semibold uppercase tracking-[0.15em]">
+                        <a href="#about">About</a>
+                        {account ? (
+                            <>
+                                <span>Hi, {account.name}</span>
+                                <Link href="/profile">My profile</Link>
+                                <button type="button" onClick={handleLogOut} className="rounded-full border border-[#343329] px-4 py-2">Log out</button>
+                            </>
+                        ) : account === null ? (
+                            <>
+                                <Link href="/login">Log in</Link>
+                                <Link href="/signup" className="rounded-full border border-[#343329] px-4 py-2">Sign up</Link>
+                            </>
+                        ) : null}
+                    </div>
                 </nav>
 
                 <section className="relative z-10 flex flex-col items-center px-6 pt-20 text-center sm:pt-24">
@@ -192,11 +222,12 @@ export default function Home() {
                             </div>
                             <button
                                 onClick={createGroup}
-                                disabled={!groupName.trim() || !groupLocation.trim()}
+                                disabled={!groupName.trim() || !groupLocation.trim() || saving}
                                 className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                                 Create Your Group →
                             </button>
+                            {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
                         </div>
                     </div>
                 </section>

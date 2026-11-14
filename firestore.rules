@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Class prototype: rooms contain the shared group state, including nominations.
+    // Nomination visibility is filtered in the UI, not enforced per field by these rules.
+    // profiles/{uid} contains account preferences and is accessible only to its owner.
+    function signedIn() { return request.auth != null; }
+    function validRoom(data) {
+      return data.keys().hasOnly(['version', 'groupName', 'location', 'createdAt', 'tieStrategy',
+          'phase', 'round', 'members', 'preferences', 'restaurants', 'candidateIds', 'votes',
+          'initialVotes', 'winnerId', 'reaskReason', 'feedback']) &&
+        data.version == 2 && data.groupName is string && data.groupName.size() <= 100 &&
+        data.location is string && data.location.size() <= 500 && data.createdAt is number &&
+        data.tieStrategy in ['random', 'runoff'] &&
+        data.phase in ['nominations', 'voting', 'runoff', 'results'] && data.round in [0, 1] &&
+        data.members is map && data.members.size() <= 30 &&
+        data.preferences is map && data.preferences.size() <= 30 &&
+        data.restaurants is map && data.restaurants.size() <= 900 &&
+        data.candidateIds is list && data.candidateIds.size() <= 900 &&
+        data.votes is map && data.votes.size() <= 30 &&
+        data.initialVotes is map && data.initialVotes.size() <= 30 &&
+        data.feedback is map && data.feedback.size() <= 30 &&
+        (data.winnerId == null || data.winnerId is string) &&
+        (data.reaskReason == null || data.reaskReason is string);
+    }
+    function validProfile(data) {
+      return data.keys().hasOnly(['displayName', 'favorites', 'budgetRanges', 'distanceCapMiles', 'hostLocation']) &&
+        data.displayName is string && data.displayName.size() <= 100 &&
+        data.favorites is list && data.favorites.size() <= 30 &&
+        data.budgetRanges is list && data.budgetRanges.size() > 0 && data.budgetRanges.size() <= 4 &&
+        data.budgetRanges.hasOnly(['UNDER_10', 'TEN_TO_THIRTY', 'THIRTY_TO_SIXTY', 'SIXTY_PLUS']) &&
+        (data.distanceCapMiles == null || (data.distanceCapMiles is number && data.distanceCapMiles > 0 && data.distanceCapMiles <= 500)) &&
+        (data.hostLocation == null || (data.hostLocation is map && data.hostLocation.keys().hasOnly(['lat', 'lng', 'address'])));
+    }
+    match /rooms/{roomId} {
+      allow get: if signedIn();
+      allow create: if signedIn() && validRoom(request.resource.data);
+      allow update: if signedIn() && validRoom(request.resource.data) &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.tieStrategy == resource.data.tieStrategy;
+      allow list, delete: if false;
+    }
+    match /profiles/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create, update: if signedIn() && request.auth.uid == uid && validProfile(request.resource.data);
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

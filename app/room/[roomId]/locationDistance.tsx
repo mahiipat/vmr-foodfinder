@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { updateMemberDistance, type RoomState, type HostLocation } from "../../../backend/AppBackend";
+import { updateMemberDistance, userErrorMessage, type RoomState, type HostLocation } from "../../../backend/AppBackend";
 import { getMemberSession } from "../../../lib/foodfinder";
 
 export default function LocationDistance({ roomId, state, disabled = false }: {
@@ -26,7 +26,7 @@ export default function LocationDistance({ roomId, state, disabled = false }: {
       await updateMemberDistance(roomId, memberId, { distanceCapMiles: nextCap, location: nextLocation });
       setStatus("Your distance preferences are saved.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Unable to save preferences.");
+      setStatus(userErrorMessage(error, "Unable to save preferences."));
     } finally {
       setBusy(false);
     }
@@ -59,7 +59,7 @@ export default function LocationDistance({ roomId, state, disabled = false }: {
         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[#343329]/50 transition peer-checked:border-[#566B48] peer-checked:bg-[#566B48] peer-focus-visible:ring-2 peer-focus-visible:ring-[#566B48]/40">
           {enabled && <span className="text-xs text-white">✓</span>}
         </span>
-        Limit how far I'll travel
+        Limit how far I&apos;ll travel
       </label>
       {enabled && <div className="mt-5 space-y-4">
         <button type="button" disabled={busy || disabled || !memberId} onClick={useLocation} className="rounded-full border border-[#343329] px-6 py-3 text-xs transition hover:bg-[#343329] hover:text-white disabled:opacity-40">Use my current location</button>

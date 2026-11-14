@@ -1,6 +1,5 @@
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "../backend/firebase";
-import { ALL_BUDGET_RANGES, type BudgetRange } from "../backend/AppBackend";
+import { auth } from "../backend/firebase";
+import { ALL_BUDGET_RANGES, getProfile, saveProfile, type BudgetRange } from "../backend/AppBackend";
 
 export type AccountPreferences = {
   budgetRanges: BudgetRange[];
@@ -13,26 +12,24 @@ export const DEFAULT_ACCOUNT_PREFERENCES: AccountPreferences = {
 };
 
 export async function getAccountPreferences(uid: string): Promise<AccountPreferences> {
-  const snapshot = await getDoc(doc(db, "users", uid));
-  if (!snapshot.exists()) return { ...DEFAULT_ACCOUNT_PREFERENCES };
-  const raw = snapshot.data();
-  const ranges = Array.isArray(raw.budgetRanges)
-    ? raw.budgetRanges.filter((range: unknown): range is BudgetRange =>
-        typeof range === "string" && ALL_BUDGET_RANGES.includes(range as BudgetRange))
-    : [...ALL_BUDGET_RANGES];
-  const cap = raw.distanceCapMiles;
+  await auth.authStateReady();
+  if (!uid || auth.currentUser?.uid !== uid) throw new Error("Sign in to load your preferences.");
+  const profile = await getProfile();
   return {
-    budgetRanges: ranges.length ? ranges : [...ALL_BUDGET_RANGES],
-    distanceCapMiles: typeof cap === "number" && Number.isFinite(cap) && cap > 0 ? cap : null,
+    budgetRanges: profile.budgetRanges,
+    distanceCapMiles: profile.distanceCapMiles,
   };
 }
 
 export async function saveAccountPreferences(uid: string, preferences: AccountPreferences) {
-  if (!uid) throw new Error("Sign in to save your preferences.");
+  await auth.authStateReady();
+  if (!uid || auth.currentUser?.uid !== uid) throw new Error("Sign in to save your preferences.");
   if (!preferences.budgetRanges.length) throw new Error("Select at least one budget range.");
-  await setDoc(doc(db, "users", uid), {
+  const profile = await getProfile();
+  await saveProfile({
+    ...profile,
+    displayName: auth.currentUser.displayName ?? profile.displayName,
     budgetRanges: preferences.budgetRanges,
     distanceCapMiles: preferences.distanceCapMiles,
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
+  });
 }

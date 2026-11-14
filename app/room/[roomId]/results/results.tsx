@@ -2,9 +2,9 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  chooseTieBreaker,
   subscribeRoomState,
-  submitSatisfaction,
+  submitResultFeedback,
+  userErrorMessage,
   type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
@@ -14,20 +14,17 @@ export default function Results({ roomId }: { roomId: string }) {
   const router = useRouter();
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [memberId, setMemberId] = useState("");
+  const [memberId] = useState(() => getMemberSession(roomId)?.memberId || "");
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackError, setFeedbackError] = useState("");
-
-  useEffect(() => { setMemberId(getMemberSession(roomId)?.memberId || ""); }, [roomId]);
 
   useEffect(() => { void trackScreen("results"); }, []);
   useEffect(() => {
     const stop = subscribeRoomState(roomId, (next) => {
       setState(next);
       setLoaded(true);
-    }, (err) => setError(err.message));
+    }, (err) => { setError(userErrorMessage(err)); setLoaded(true); });
     return () => stop();
   }, [roomId]);
 
@@ -35,55 +32,24 @@ export default function Results({ roomId }: { roomId: string }) {
   const totalVotes = Object.keys(state?.votesByMember || {}).filter(
     (id) => (state?.votesByMember[id] || []).length > 0,
   ).length;
-  const tied = state?.hasTie && state.allMembersVoted;
-  const runoffComplete = state?.tieMode === "runoff" && state.runoffAllMembersVoted;
-  const randomWinner = state?.tieMode === "random"
-    ? rankings.find((r) => r.id === state.tieWinnerId) || null : null;
-  const finalWinner = randomWinner || (runoffComplete ? state?.runoffWinner : null) ||
-    (state?.allMembersVoted && !state.hasTie ? state.winner : null);
-  const candidateIds = state?.tieMode === "runoff" && runoffComplete && state.runoffHasTie
-    ? state.runoffRankings.filter((r) => r.votes === state.runoffRankings[0]?.votes).map((r) => r.id)
-    : rankings.filter((r) => r.votes > 0 && r.votes === rankings[0]?.votes).map((r) => r.id);
-  const needsDecision = Boolean(tied && (!state?.tieMode || (runoffComplete && state.runoffHasTie)));
-
-  const decisionKey = finalWinner
-    ? state?.tieMode === "random" ? `random:${state.tieWinnerId}`
-      : state?.tieMode === "runoff" ? `runoff:${state.runoffRoundId}`
-      : `original:${finalWinner.id}`
-    : null;
-  const satisfaction = state?.satisfactionByMember || {};
+  const finalWinner = state?.phase === "results" ? state.winner : null;
+  const satisfaction = state?.satisfactionByMember ?? {};
   const responses = Object.values(satisfaction);
   const happyCount = responses.filter(Boolean).length;
   const myResponse = memberId && Object.prototype.hasOwnProperty.call(satisfaction, memberId)
     ? satisfaction[memberId] : null;
 
   async function saveFeedback(happy: boolean) {
-    if (!finalWinner || !decisionKey || !memberId || feedbackSaving) return;
+    if (!finalWinner || !memberId || feedbackSaving) return;
     setFeedbackSaving(true);
     setFeedbackError("");
     try {
-      await submitSatisfaction(roomId, memberId, finalWinner.id, decisionKey, happy);
+      await submitResultFeedback(roomId, memberId, happy);
       void trackEvent("winner_satisfaction_submitted", { happy });
     } catch (err) {
-      setFeedbackError(err instanceof Error ? err.message : "Could not save your response.");
+      setFeedbackError(userErrorMessage(err, "Could not save your response."));
     } finally {
       setFeedbackSaving(false);
-    }
-  }
-
-  async function choose(mode: "random" | "runoff") {
-    if (!state || saving || !needsDecision) return;
-    setSaving(true);
-    setError("");
-    try {
-      await chooseTieBreaker(roomId, mode, candidateIds,
-        state.tieMode === "runoff" ? state.runoffRoundId : null);
-      void trackEvent("tie_breaker_selected", { mode });
-      if (mode === "runoff") router.push(`/room/${roomId}/vote`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not resolve the tie.");
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -110,14 +76,14 @@ export default function Results({ roomId }: { roomId: string }) {
               <div className="flex flex-col items-center gap-8">
                 <div className="w-full border border-[#566B48]/40 bg-[#E4E8D8] px-6 py-9 sm:px-10">
                   <p className="text-[10px] uppercase tracking-[0.3em] text-[#566B48]">
-                    {state?.tieMode === "random" ? "It's a tie — a random winner was chosen!" : state?.tieMode === "runoff" ? "The runoff winner" : "We have a winner!"}
+                    {state?.round === 1 ? "The runoff winner" : rankings.length > 1 && rankings[0].votes === rankings[1].votes ? "It's a tie — a random winner was chosen!" : "We have a winner!"}
                   </p>
                   <h2 className="mt-5 font-serif text-5xl sm:text-6xl">{finalWinner.name}</h2>
                   <p className="mt-5 text-sm text-[#566B48]">{finalWinner.cuisine} · {finalWinner.priceLabel}</p>
                   <div className="mt-6 flex flex-wrap justify-center gap-x-6 gap-y-2 text-xs text-[#566B48]">
                     <span>Rating: {finalWinner.reviewCount > 0 ? `${finalWinner.rating.toFixed(1)} / 5 (${finalWinner.reviewCount} reviews)` : "Not available"}</span>
                     <span>{finalWinner.priceLabel}</span>
-                    {finalWinner.lat !== undefined && finalWinner.lng !== undefined && (
+                    {finalWinner.distanceMiles !== null && finalWinner.lat !== undefined && finalWinner.lng !== undefined && (
                       <span>{finalWinner.distanceMiles.toFixed(1)} mi (estimated)</span>
                     )}
                   </div>
@@ -146,30 +112,16 @@ export default function Results({ roomId }: { roomId: string }) {
                   </div>
                 </div>
               </div>
-            ) : totalVotes === 0 ? (
+            ) : totalVotes === 0 && state?.phase !== "runoff" ? (
               <><p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">Awaiting votes</p><h2 className="mt-5 font-serif text-5xl">No votes yet.</h2></>
-            ) : !state?.allMembersVoted ? (
+            ) : state?.phase === "voting" ? (
               <><p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">Voting in progress</p><h2 className="mt-5 font-serif text-5xl">Waiting for everyone.</h2><p className="mt-5 text-sm text-[#68665A]">The final result will appear when everyone has voted.</p></>
-            ) : state?.tieMode === "runoff" && !runoffComplete ? (
-              <><p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">Runoff in progress</p><h2 className="mt-5 font-serif text-5xl">One more vote.</h2><p className="mt-5 text-sm text-[#68665A]">{Object.keys(state.runoffVotesByMember).length} of {state.members.length} members voted in the runoff.</p><button onClick={() => router.push(`/room/${roomId}/vote`)} className="mt-8 rounded-full bg-[#343329] px-9 py-4 text-[11px] uppercase tracking-[0.2em] text-white">Go to Runoff →</button></>
+            ) : state?.phase === "runoff" ? (
+              <><p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">Runoff in progress</p><h2 className="mt-5 font-serif text-5xl">One more vote.</h2><p className="mt-5 text-sm text-[#68665A]">{Object.keys(state.votesByMember).length} of {state.members.length} members voted in the runoff.</p><button onClick={() => router.push(`/room/${roomId}/vote`)} className="mt-8 rounded-full bg-[#343329] px-9 py-4 text-[11px] uppercase tracking-[0.2em] text-white">Go to Runoff →</button></>
             ) : (
-              <><p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">It&apos;s a tie</p><h2 className="mt-5 font-serif text-5xl">More than one favorite.</h2><p className="mt-5 text-sm text-[#68665A]">{state?.tieMode === "runoff" ? "The runoff ended in a tie too. Choose how to decide." : "Top restaurants are tied. How would you like to decide?"}</p></>
+              <><p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">It&apos;s a tie</p><h2 className="mt-5 font-serif text-5xl">More than one favorite.</h2><p className="mt-5 text-sm text-[#68665A]">The group decision is not available yet.</p></>
             )}
 
-            {needsDecision && (
-              <div className="mx-auto mt-10 grid max-w-xl grid-cols-2 gap-3 sm:gap-4">
-                <button disabled={saving} onClick={() => void choose("random")} className="border border-[#A86B65]/45 bg-[#E8C9C2]/60 p-4 text-left transition hover:bg-[#E8C9C2] disabled:opacity-40 sm:p-6">
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-[#777466]">Option 01</span>
-                  <span className="mt-3 block font-serif text-xl sm:text-3xl">Random Winner</span>
-                  <span className="mt-3 block text-xs leading-6 text-[#68665A]">Choose one tied restaurant at random. Everyone sees the same winner.</span>
-                </button>
-                <button disabled={saving} onClick={() => void choose("runoff")} className="border border-[#A86B65]/45 bg-[#E8C9C2]/60 p-4 text-left transition hover:bg-[#E8C9C2] disabled:opacity-40 sm:p-6">
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-[#777466]">Option 02</span>
-                  <span className="mt-3 block font-serif text-xl sm:text-3xl">Runoff Vote</span>
-                  <span className="mt-3 block text-xs leading-6 text-[#68665A]">Vote again, this time only between the tied restaurants.</span>
-                </button>
-              </div>
-            )}
             {error && <p role="alert" className="mt-5 text-sm text-[#9C5A49]">{error}</p>}
           </div>
         </section>
@@ -185,8 +137,8 @@ export default function Results({ roomId }: { roomId: string }) {
               </div>
             ))}
           </div>
-          {state?.tieMode === "runoff" && state.runoffRankings.length > 0 && (
-            <div className="mt-14 border-t border-[#343329]/30 pt-10"><h3 className="font-serif text-4xl">Runoff results.</h3><div className="mt-7 space-y-4">{state.runoffRankings.map((r) => <div key={r.id} className="flex justify-between border-b border-[#343329]/15 pb-3"><span className="font-serif text-2xl">{r.name}</span><span>{r.votes} {r.votes === 1 ? "vote" : "votes"}</span></div>)}</div></div>
+          {state?.round === 1 && rankings.length > 0 && (
+            <div className="mt-14 border-t border-[#343329]/30 pt-10"><h3 className="font-serif text-4xl">Runoff results.</h3><div className="mt-7 space-y-4">{rankings.map((r) => <div key={r.id} className="flex justify-between border-b border-[#343329]/15 pb-3"><span className="font-serif text-2xl">{r.name}</span><span>{r.votes} {r.votes === 1 ? "vote" : "votes"}</span></div>)}</div></div>
           )}
           <div className="mt-16 flex flex-wrap justify-center gap-4"><button onClick={() => router.push(`/room/${roomId}/vote`)} className="rounded-full border border-[#343329] px-8 py-4 text-[10px] uppercase tracking-[0.2em]">Back to Voting</button><button onClick={() => { void trackEvent("new_group_started"); router.push("/"); }} className="rounded-full bg-[#343329] px-8 py-4 text-[10px] uppercase tracking-[0.2em] text-white">Start Another Group →</button></div>
         </section>

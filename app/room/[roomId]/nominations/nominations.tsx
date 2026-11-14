@@ -5,8 +5,10 @@ import {
   ALL_BUDGET_RANGES,
   budgetRangeLabels,
   markMemberReadyForVoting,
+  removeNomination,
   submitPreferences,
   subscribeRoomState,
+  userErrorMessage,
   type BudgetRange,
   type RoomState,
 } from "../../../../backend/AppBackend";
@@ -33,7 +35,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
     const stop = subscribeRoomState(roomId, (nextState) => {
       setState(nextState);
       setLoaded(true);
-    });
+    }, (error) => { setError(userErrorMessage(error, "Unable to load nominations. Please try again.")); setLoaded(true); });
 
     return () => stop();
   }, [roomId]);
@@ -56,10 +58,16 @@ export default function Nominations({ roomId }: { roomId: string }) {
   async function saveBudgetRanges(nextRanges: BudgetRange[]) {
     if (!memberId) return;
 
-    await submitPreferences(roomId, memberId, {
-      budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
-    });
-    void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
+    setError("");
+    try {
+      const result = await submitPreferences(roomId, memberId, {
+        budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
+      });
+      setState(result.state);
+      void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
+    } catch (error) {
+      setError(userErrorMessage(error, "Unable to save budget ranges. Please try again."));
+    }
   }
 
   async function toggleBudgetRange(range: BudgetRange) {
@@ -82,15 +90,16 @@ export default function Nominations({ roomId }: { roomId: string }) {
     setSaving(true);
     setError("");
     try {
-      await submitPreferences(roomId, memberId, {
+      const result = await submitPreferences(roomId, memberId, {
         favorites: [...current, restaurantName],
         budgetRanges: selectedBudgetRanges,
       });
+      setState(result.state);
       setName("");
       void trackEvent("restaurant_nominated");
     } catch (error) {
       console.error(error);
-      setError("Couldn't add your nomination. Please try again.");
+      setError(userErrorMessage(error, "Couldn't add your nomination. Please try again."));
     } finally {
       setSaving(false);
     }
@@ -101,10 +110,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
     setSaving(true);
     setError("");
     try {
-      await submitPreferences(roomId, memberId, {
-        favorites: (myPreference?.favorites ?? []).filter((favorite) => favorite !== restaurantName),
-        budgetRanges: selectedBudgetRanges,
-      });
+      const result = await removeNomination(roomId, memberId, restaurantName);
+      setState(result.state);
       void trackEvent("restaurant_nomination_removed");
     } catch (error) {
       console.error(error);
@@ -116,18 +123,11 @@ export default function Nominations({ roomId }: { roomId: string }) {
 
   async function markReady() {
     if (!memberId || !state || saving) return;
-    if ((myPreference?.favorites ?? []).length === 0) {
-      setError("Please add at least one nomination before you're ready to vote.");
-      return;
-    }
-    if (state.options.length === 0) {
-      setError("No restaurants match the group's budget ranges. Please adjust the ranges before voting.");
-      return;
-    }
     setSaving(true);
     setError("");
     try {
-      await markMemberReadyForVoting(roomId, memberId, true);
+      const result = await markMemberReadyForVoting(roomId, memberId, true);
+      setState(result.state);
       void trackEvent("ready_to_vote");
     } catch (error) {
       console.error(error);
@@ -247,8 +247,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
               Add Nomination +
             </button>
 
-            {error && (
-              <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{error}</p>
+            {(error || state?.reaskReason) && (
+              <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{error || state?.reaskReason}</p>
             )}
 
             {!memberId && (
@@ -267,7 +267,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
             </p>
             <h2 className="mt-4 font-serif text-4xl"> The contenders. </h2>
             <p className="mt-3 text-sm text-[#68665A]">
-              {restaurants.length} currently match everyone&apos;s range
+              Your {restaurants.length} nominations. Other members&apos; restaurants are revealed when voting starts.
             </p>
 
             {restaurants.length === 0 && (
@@ -289,12 +289,10 @@ export default function Nominations({ roomId }: { roomId: string }) {
                     </span>
                   </div>
                   <p className="mt-3 text-sm text-[#68665A]">
-                    {restaurant.cuisine} · {restaurant.distanceMiles.toFixed(1)}{" "}
-                    mi
+                    {restaurant.cuisine} · {restaurant.distanceMiles === null ? "Distance unavailable" : `${restaurant.distanceMiles.toFixed(1)} mi`}
                   </p>
                   <p className="mt-2 text-xs text-[#777466]">
-                    ⭐ {restaurant.rating.toFixed(1)} ({restaurant.reviewCount}{" "}
-                    ratings)
+                    {restaurant.reviewCount > 0 ? `⭐ ${restaurant.rating.toFixed(1)} (${restaurant.reviewCount} ratings)` : "No ratings available"}
                   </p>
                   {myPreference?.favorites.some(
                     (favorite) =>

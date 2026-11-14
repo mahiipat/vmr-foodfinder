@@ -2,8 +2,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from "firebase/auth";
-import { auth } from "../backend/firebase";
+import { authErrorMessage, logIn, signUp } from "../backend/AppBackend";
 
 export default function AuthForm({
   mode,
@@ -25,24 +24,14 @@ export default function AuthForm({
 
     try {
       if (mode === "signup") {
-        const credential = await createUserWithEmailAndPassword(
-          auth,
-          email,
-          password
-        );
-
-        await updateProfile(credential.user, {
-          displayName: name.trim(),
-        });
+        await signUp(email, password, name);
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        await logIn(email, password);
       }
 
-      router.push("/profile");
+      router.push("/");
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Authentication failed."
-      );
+      setError(authErrorMessage(err));
     } finally {
       setBusy(false);
     }

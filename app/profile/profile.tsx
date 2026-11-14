@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, signOut, updateProfile, type User } from "firebase/auth";
 import { auth } from "../../backend/firebase";
-import { ALL_BUDGET_RANGES, budgetRangeLabels, type BudgetRange } from "../../backend/AppBackend";
+import { ALL_BUDGET_RANGES, budgetRangeLabels, userErrorMessage, type BudgetRange } from "../../backend/AppBackend";
 import { getAccountPreferences, saveAccountPreferences } from "../../lib/accountPreferences";
 
 export default function Profile() {
@@ -25,8 +25,8 @@ export default function Profile() {
       setUser(currentUser);
       setName(currentUser?.displayName ?? "");
       setLoading(false);
-      if (!currentUser) router.replace("/login");
-      if (currentUser) {
+      if (!currentUser || currentUser.isAnonymous) router.replace("/login");
+      if (currentUser && !currentUser.isAnonymous) {
         void getAccountPreferences(currentUser.uid).then((prefs) => {
           setBudgets(prefs.budgetRanges);
           setDistanceEnabled(prefs.distanceCapMiles !== null);
@@ -63,7 +63,7 @@ export default function Profile() {
       await saveAccountPreferences(user.uid, { budgetRanges: budgets, distanceCapMiles: distanceEnabled ? cap : null });
       setMessage("Your default preferences have been saved.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to save preferences.");
+      setMessage(userErrorMessage(error, "Unable to save preferences."));
     } finally {
       setPrefsBusy(false);
     }
@@ -143,12 +143,12 @@ export default function Profile() {
                   <span className="flex h-5 w-5 items-center justify-center rounded-full border border-[#566B48] peer-checked:bg-[#566B48]">
                     {distanceEnabled && <span className="text-xs text-white">✓</span>}
                   </span>
-                  Limit how far I'll travel
+                  Limit how far I&apos;ll travel
                 </label>
                 {distanceEnabled && <label className="mt-5 block text-sm">Maximum distance (miles)
                   <input type="number" min="0.1" step="0.5" required value={distance} onChange={(event) => setDistance(event.target.value)} className="mt-2 w-full border-b border-[#343329]/40 bg-transparent px-2 py-3 outline-none" />
                 </label>}
-                <p className="mt-4 text-xs leading-5 text-[#68665A]">We'll ask for your device location in each room. Your profile saves the distance limit, not your coordinates.</p>
+                <p className="mt-4 text-xs leading-5 text-[#68665A]">We&apos;ll ask for your device location in each room. Your profile saves the distance limit, not your coordinates.</p>
                 <button disabled={prefsBusy} type="submit" className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] uppercase tracking-[0.2em] text-white disabled:opacity-40">{prefsBusy ? "Saving..." : "Save preferences →"}</button>
               </form>
               <form onSubmit={openRoom} className="mt-12 border-t border-[#343329]/20 pt-8">
