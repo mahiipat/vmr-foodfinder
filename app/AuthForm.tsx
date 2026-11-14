@@ -71,7 +71,7 @@ export default function AuthForm({
             href={mode === "login" ? "/signup" : "/login"}
             className="text-[10px] font-semibold uppercase tracking-[0.25em] transition hover:opacity-60"
           >
-            {mode === "login" ? "Sign Up" : "Log In"}
+            {mode === "login" ? "Sign Up" : "Login"}
           </Link>
         </nav>
 
@@ -169,7 +169,7 @@ export default function AuthForm({
                 {busy
                   ? "Please wait..."
                   : mode === "login"
-                  ? "Log In →"
+                  ? "Login →"
                   : "Create Account →"}
               </button>
             </form>
@@ -182,7 +182,7 @@ export default function AuthForm({
                 href={mode === "login" ? "/signup" : "/login"}
                 className="font-medium text-[#343329] underline underline-offset-4 transition hover:text-[#566B48]"
               >
-                {mode === "login" ? "Sign up" : "Log in"}
+                {mode === "login" ? "Sign up" : "Login"}
               </Link>
             </p>
           </div>
