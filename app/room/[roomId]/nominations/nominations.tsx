@@ -247,28 +247,6 @@ export default function Nominations({ roomId }: { roomId: string }) {
               Add Nomination +
             </button>
 
-            {(myPreference?.favorites ?? []).length > 0 && (
-              <div className="mt-8 space-y-3">
-                <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">
-                  Your nominations
-                </p>
-                {(myPreference?.favorites ?? []).map((restaurantName) => (
-                  <div key={restaurantName} className="border border-[#343329]/20 bg-white/20 p-5">
-                    <h3 className="font-serif text-2xl">{restaurantName}</h3>
-                    <button
-                      type="button"
-                      disabled={saving || waiting}
-                      onClick={() => void removeRestaurant(restaurantName)}
-                      className="mt-5 flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-[#9C5A49] disabled:opacity-40"
-                    >
-                      <span aria-hidden="true" className="text-lg leading-none">⊗</span>
-                      Remove Nomination
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
             {error && (
               <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{error}</p>
             )}
@@ -302,7 +280,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
               {restaurants.map((restaurant) => (
                 <div
                   key={restaurant.id}
-                  className="border border-[#343329]/20 bg-white/20 p-6"
+                  className="relative border border-[#343329]/20 bg-white/20 p-6 pb-14"
                 >
                   <div className="flex items-start justify-between gap-4">
                     <h3 className="font-serif text-3xl">{restaurant.name}</h3>
@@ -318,6 +296,19 @@ export default function Nominations({ roomId }: { roomId: string }) {
                     ⭐ {restaurant.rating.toFixed(1)} ({restaurant.reviewCount}{" "}
                     ratings)
                   </p>
+                  {myPreference?.favorites.some(
+                    (favorite) =>
+                      favorite.toLowerCase() === restaurant.name.toLowerCase()
+                  ) && (
+                    <button
+                      type="button"
+                      onClick={() => void removeRestaurant(restaurant.name)}
+                      disabled={saving || waiting}
+                      className="absolute bottom-4 right-4 flex items-center gap-2 text-xs text-[#9C5A49] hover:underline disabled:opacity-40"
+                    >
+                      <span>✕  Remove Nomination</span>
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
