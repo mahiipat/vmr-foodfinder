@@ -63,9 +63,11 @@ export async function POST(request: Request) {
         : [
             "https://places.googleapis.com/v1/places:searchNearby",
             {
-                includedTypes: ["restaurant"],
+                // primary type only, so places like gas stations that also serve food are left out
+                includedPrimaryTypes: ["restaurant"],
                 maxResultCount: MAX_RESULTS,
-                rankPreference: "DISTANCE",
+                // DISTANCE surfaces empty listings pinned to the city center; POPULARITY gives real, rated places
+                rankPreference: "POPULARITY",
                 locationRestriction: { circle: { center, radius: NEARBY_RADIUS_METERS } },
             },
         ];

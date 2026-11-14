@@ -12,7 +12,7 @@ type Props = {
     onAddName: (name: string) => Promise<void>;
 };
 
-// Empty box: restaurants closest to the group. Typing: search by name.
+// Empty box: popular restaurants near the group. Typing: search by name.
 // If search isn't configured it turns into the plain "type a name" input.
 export default function RestaurantSearch({ center, disabled, nominatedPlaceIds, onAddPlace, onAddName }: Props) {
     const [query, setQuery] = useState("");
@@ -97,7 +97,7 @@ export default function RestaurantSearch({ center, disabled, nominatedPlaceIds, 
 
     const heading = trimmed
         ? `Results for "${trimmed}"`
-        : center ? `Closest to ${center.label}` : "Search for a restaurant";
+        : center ? `Popular near ${center.label}` : "Search for a restaurant";
 
     return (
         <div className="mt-6">
