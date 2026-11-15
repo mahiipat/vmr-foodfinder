@@ -1,689 +1,590 @@
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  onSnapshot,
-  serverTimestamp,
-  setDoc,
-  Unsubscribe,
-  arrayUnion,
-  writeBatch,
-} from "firebase/firestore";
-import { db } from "./firebase";
-import { isDietaryTag, type DietaryTag } from "../lib/dietary";
+import { createUserWithEmailAndPassword, EmailAuthProvider, linkWithCredential, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut, updateProfile, type User } from "firebase/auth";
+import { addDoc, collection, doc, getDoc, onSnapshot, runTransaction, setDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
+// type-only so the test fixture (which only allows Firebase imports at runtime) still loads this file
+import type { DietaryTag } from "../lib/dietary";
 
-type PriceLevel =
-  | "PRICE_LEVEL_FREE"
-  | "PRICE_LEVEL_INEXPENSIVE"
-  | "PRICE_LEVEL_MODERATE"
-  | "PRICE_LEVEL_EXPENSIVE"
-  | "PRICE_LEVEL_VERY_EXPENSIVE";
-
-export type BudgetRange =
-  | "UNDER_10"
-  | "TEN_TO_THIRTY"
-  | "THIRTY_TO_SIXTY"
-  | "SIXTY_PLUS";
-
+export type BudgetRange = "UNDER_10" | "TEN_TO_THIRTY" | "THIRTY_TO_SIXTY" | "SIXTY_PLUS";
+export const ALL_BUDGET_RANGES: BudgetRange[] = ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"];
+export const budgetRangeLabels: Record<BudgetRange, string> = {
+  UNDER_10: "Under $10", TEN_TO_THIRTY: "$10 to $30", THIRTY_TO_SIXTY: "$30 to $60", SIXTY_PLUS: "$60+",
+};
+export type HostLocation = { lat?: number; lng?: number; address?: string };
+export type MemberDistance = { location: HostLocation | null; distanceCapMiles: number | null };
+export type TieStrategy = "random" | "runoff";
+export type Restaurant = {
+  id: string; name: string; cuisine: string; budgetRange: BudgetRange | null;
+  priceLevel?: string; priceLabel: string; distanceMiles: number | null;
+  rating: number; reviewCount: number; lat?: number; lng?: number; address?: string;
+  // Google Places details (only on restaurants picked from search)
+  placeId?: string; photoName?: string; mapsUrl?: string; website?: string;
+  // Yelp dietary info: dietaryChecked is false when the restaurant wasn't found on Yelp
+  dietaryTags?: DietaryTag[]; dietaryChecked?: boolean; yelpUrl?: string;
+};
 export type PreferenceInput = {
-  budgetRanges?: BudgetRange[];
-  favorites?: string[];
-  readyToVote?: boolean;
+  budgetRanges?: BudgetRange[]; favorites?: string[]; restaurants?: Restaurant[]; readyToVote?: boolean;
+  distanceCapMiles?: number | null; hostLocation?: HostLocation | null; dietaryNeeds?: DietaryTag[];
+};
+export type Preference = {
+  memberId: string; budgetRanges: BudgetRange[]; favorites: string[];
+  readyToVote: boolean; distanceCapMiles: number | null; hostLocation: HostLocation | null;
+  // optional so rooms created before dietary needs existed still load
   dietaryNeeds?: DietaryTag[];
 };
-
-type Preference = {
-  memberId: string;
-  budgetRanges: BudgetRange[];
-  favorites: string[];
-  readyToVote?: boolean;
-  dietaryNeeds: DietaryTag[];
+export type GroupData = {
+  version: 2; groupName: string; location: string; createdAt: number;
+  tieStrategy: TieStrategy; phase: "nominations" | "voting" | "runoff" | "results";
+  round: number; members: Record<string, { name: string }>;
+  preferences: Record<string, Preference>; restaurants: Record<string, Restaurant>;
+  candidateIds: string[]; votes: Record<string, string[]>; initialVotes: Record<string, string[]>;
+  winnerId: string | null; reaskReason: string | null;
+  feedback: Record<string, { happy: boolean; restaurantId: string; updatedAt: number }>;
 };
-
-export type Restaurant = {
-  id: string;
-  name: string;
-  cuisine: string;
-  priceLevel?: PriceLevel;
-  budgetRange: BudgetRange;
-  priceLabel: string;
-  distanceMiles: number | null;
-  rating: number;
-  reviewCount: number;
-  // only set for restaurants picked from Google Places search
-  placeId?: string;
-  address?: string;
-  photoName?: string;
-  mapsUrl?: string;
-  website?: string;
-  // from Yelp categories; dietaryChecked is false when the restaurant wasn't found on Yelp
-  dietaryTags?: DietaryTag[];
-  dietaryChecked?: boolean;
-  yelpUrl?: string;
-};
-
-// A Google Places restaurant (plus its Yelp dietary lookup) as it comes from the search box.
-export type NominatedPlace = {
-  placeId: string;
-  name: string;
-  cuisine: string;
-  address: string;
-  priceLevel: string | null;
-  distanceMiles: number | null;
-  rating: number | null;
-  userRatingCount: number | null;
-  photoName: string | null;
-  mapsUrl: string;
-  website: string;
-  dietaryTags: DietaryTag[];
-  dietaryChecked: boolean;
-  yelpUrl: string;
-};
-
-type PlacesApiRestaurant = {
-  id: string;
-  name: string;
-  cuisine: string;
-  priceLevel?: PriceLevel;
-  distanceMiles: number;
-  rating: number;
-  userRatingCount: number;
-};
-
 export type RoomState = {
-  room: Record<string, unknown>;
-  members: Array<{ id: string; name: string }>;
-  preferences: Preference[];
-  options: Array<Restaurant & { votes: number }>;
-  winner: (Restaurant & { votes: number }) | null;
-  votesByMember: Record<string, string[]>;
-  readyMemberIds: string[];
-  allMembersReadyToVote: boolean;
-  allMembersVoted: boolean;
-  hasTie: boolean;
+  room: Record<string, unknown>; members: Array<{ id: string; name: string }>;
+  preferences: Preference[]; options: Array<Restaurant & { votes: number }>;
+  memberDistances: Record<string, MemberDistance>;
+  winner: (Restaurant & { votes: number }) | null; votesByMember: Record<string, string[]>;
+  readyMemberIds: string[]; allMembersReadyToVote: boolean; allMembersVoted: boolean;
+  hasTie: boolean; distanceCapMiles: number | null; hostLocation: HostLocation | null;
+  distanceFilteringAvailable: boolean;
+  // every dietary need anyone in the group selected (preferences above only include your own)
+  groupDietaryNeeds: DietaryTag[];
+  phase: GroupData["phase"]; round: number; tieStrategy: TieStrategy;
+  reaskReason: string | null; feedback: GroupData["feedback"];
+  satisfactionByMember: Record<string, boolean>;
 };
-
-export const ALL_BUDGET_RANGES: BudgetRange[] = [
-  "UNDER_10",
-  "TEN_TO_THIRTY",
-  "THIRTY_TO_SIXTY",
-  "SIXTY_PLUS",
-];
-
-export const budgetRangeLabels: Record<BudgetRange, string> = {
-  UNDER_10: "Under $10",
-  TEN_TO_THIRTY: "$10 to $30",
-  THIRTY_TO_SIXTY: "$30 to $60",
-  SIXTY_PLUS: "$60+",
-};
-
-const priceLevelToBudgetRange: Record<PriceLevel, BudgetRange> = {
-  PRICE_LEVEL_FREE: "UNDER_10",
-  PRICE_LEVEL_INEXPENSIVE: "UNDER_10",
-  PRICE_LEVEL_MODERATE: "TEN_TO_THIRTY",
-  PRICE_LEVEL_EXPENSIVE: "THIRTY_TO_SIXTY",
-  PRICE_LEVEL_VERY_EXPENSIVE: "SIXTY_PLUS",
-};
-
-const MOCK_PLACES_API_RESULTS: PlacesApiRestaurant[] = [
-  {
-    id: "rumis-kitchen",
-    name: "Rumi's Kitchen",
-    cuisine: "Mediterranean",
-    priceLevel: "PRICE_LEVEL_MODERATE",
-    distanceMiles: 0.8,
-    rating: 4.7,
-    userRatingCount: 1800,
-  },
-  {
-    id: "kimball-house",
-    name: "Kimball House",
-    cuisine: "American",
-    priceLevel: "PRICE_LEVEL_EXPENSIVE",
-    distanceMiles: 1.1,
-    rating: 4.5,
-    userRatingCount: 1200,
-  },
-  {
-    id: "no-mas-cantina",
-    name: "No Mas! Cantina",
-    cuisine: "Mexican",
-    priceLevel: "PRICE_LEVEL_INEXPENSIVE",
-    distanceMiles: 1.3,
-    rating: 4.3,
-    userRatingCount: 900,
-  },
-  {
-    id: "le-colonial",
-    name: "Le Colonial",
-    cuisine: "Vietnamese",
-    priceLevel: "PRICE_LEVEL_EXPENSIVE",
-    distanceMiles: 1.5,
-    rating: 4.6,
-    userRatingCount: 1100,
-  },
-  {
-    id: "ecco",
-    name: "Ecco",
-    cuisine: "Italian",
-    distanceMiles: 1.6,
-    rating: 4.4,
-    userRatingCount: 1000,
-  },
-];
-
-const MOCK_RESTAURANTS: Restaurant[] = MOCK_PLACES_API_RESULTS.map((place) => {
-  const priceLevel = place.priceLevel;
-  const budgetRange = priceLevel
-    ? priceLevelToBudgetRange[priceLevel]
-    : "TEN_TO_THIRTY";
-
-  return {
-    id: place.id,
-    name: place.name,
-    cuisine: place.cuisine,
-    priceLevel,
-    budgetRange,
-    priceLabel: budgetRangeLabels[budgetRange],
-    distanceMiles: place.distanceMiles,
-    rating: place.rating,
-    reviewCount: place.userRatingCount,
-  };
-});
-
-function normalize(input: string): string {
-  return input.trim().toLowerCase();
+export class RoomError extends Error {
+  status: number;
+  constructor(message: string, status = 400) { super(message); this.status = status; }
 }
-
-function slug(input: string): string {
-  return normalize(input)
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-}
-
-function uuid(): string {
-  return (
-    globalThis.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  );
-}
-
-function restaurantDocId(nameOrId: string): string {
-  return slug(nameOrId) || `custom-${uuid()}`;
-}
-
-function resolveRestaurant(nameOrId: string): Restaurant {
-  const key = normalize(nameOrId);
-  const exact = MOCK_RESTAURANTS.find(
-    (r) => r.id === key || normalize(r.name) === key,
-  );
-  if (exact) {
-    return exact;
+export function text(value: unknown, field: string, max = 200): string {
+  if (typeof value !== "string" || !value.trim() || value.trim().length > max) {
+    throw new RoomError(`Invalid ${field}.`);
   }
-  // this needs to be done so that type script can be happy
-
-  return {
-    id: restaurantDocId(nameOrId),
-    name: nameOrId,
-    cuisine: "Custom",
-    priceLevel: "PRICE_LEVEL_MODERATE",
-    budgetRange: "TEN_TO_THIRTY",
-    priceLabel: budgetRangeLabels.TEN_TO_THIRTY,
-    distanceMiles: 1,
-    rating: 4,
-    reviewCount: 0,
-  };
+  return value.trim();
 }
-
-function dedupeNames(names: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-
-  for (const name of names) {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const key = normalize(trimmed);
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    result.push(trimmed);
+export function restaurantNameKey(value: string): string {
+  const key = value.normalize("NFKD").toLowerCase().replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+  return key || value.trim().toLowerCase();
+}
+export function names(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 30) throw new RoomError("Provide at most 30 favorites.");
+  const unique = new Map<string, string>();
+  for (const item of value) {
+    const name = text(item, "restaurant name");
+    unique.set(restaurantNameKey(name), name);
   }
-
+  return [...unique.values()];
+}
+export function budgets(value: unknown): BudgetRange[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 4 ||
+      value.some((item) => !ALL_BUDGET_RANGES.includes(item))) throw new RoomError("Select valid budget ranges.");
+  return [...new Set(value)] as BudgetRange[];
+}
+const DIETARY_TAGS: DietaryTag[] = ["vegetarian", "vegan", "gluten_free", "halal", "kosher"];
+export function dietaryNeeds(value: unknown): DietaryTag[] {
+  if (!Array.isArray(value) || value.some((item) => !DIETARY_TAGS.includes(item))) throw new RoomError("Select valid dietary needs.");
+  return [...new Set(value)] as DietaryTag[];
+}
+export function groupDietaryNeeds(group: GroupData): DietaryTag[] {
+  const needs = new Set(Object.values(group.preferences).flatMap((p) => p.dietaryNeeds ?? []));
+  return DIETARY_TAGS.filter((tag) => needs.has(tag));
+}
+// Item 10 A/B switch: false keeps restaurants whose dietary info is unknown (not on Yelp),
+// true removes them. Restaurants Yelp found but without a needed tag are still kept either way,
+// because Yelp categories are incomplete (a missing tag doesn't mean unsafe).
+export const PRUNE_UNKNOWN_DIETARY = false;
+export function passesDietaryNeeds(restaurant: Restaurant, needs: DietaryTag[], pruneUnknown = PRUNE_UNKNOWN_DIETARY): boolean {
+  if (needs.length === 0 || !pruneUnknown) return true;
+  return restaurant.dietaryChecked === true;
+}
+export function distanceCap(value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 500) {
+    throw new RoomError("Distance must be greater than zero and at most 500 miles.");
+  }
+  return value;
+}
+export function locationInput(value: unknown): HostLocation | null {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RoomError("Invalid starting location.");
+  const location = value as Record<string, unknown>;
+  if (Object.keys(location).some((key) => !["lat", "lng", "address"].includes(key))) throw new RoomError("Invalid location fields.");
+  const result: HostLocation = {};
+  for (const [field, limit] of [["lat", 90], ["lng", 180]] as const) {
+    if (location[field] !== undefined) {
+      if (typeof location[field] !== "number" || !Number.isFinite(location[field]) || Math.abs(location[field]) > limit) {
+        throw new RoomError("Invalid location coordinates.");
+      }
+      result[field] = location[field];
+    }
+  }
+  if (location.address !== undefined) {
+    if (typeof location.address !== "string" || location.address.trim().length > 500) throw new RoomError("Invalid starting address.");
+    result.address = location.address.trim();
+  }
   return result;
 }
-
-function isBudgetRange(value: unknown): value is BudgetRange {
-  return (
-    value === "UNDER_10" ||
-    value === "TEN_TO_THIRTY" ||
-    value === "THIRTY_TO_SIXTY" ||
-    value === "SIXTY_PLUS"
-  );
+export function coordinates(location: HostLocation | null): location is HostLocation & { lat: number; lng: number } {
+  return location !== null && typeof location.lat === "number" && Number.isFinite(location.lat) && Math.abs(location.lat) <= 90 &&
+    typeof location.lng === "number" && Number.isFinite(location.lng) && Math.abs(location.lng) <= 180;
 }
-
-function toBudgetRanges(value: unknown): BudgetRange[] | undefined {
-  if (Array.isArray(value)) {
-    const ranges = value.filter(isBudgetRange);
-    return ranges.length ? Array.from(new Set(ranges)) : undefined;
+export function milesBetween(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const rad = (n: number) => n * Math.PI / 180;
+  const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lng2 - lng1) / 2) ** 2;
+  return 3958.8 * 2 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, a))));
+}
+export function newGroup(groupName: string, location: string, tieStrategy: TieStrategy): GroupData {
+  return { version: 2, groupName, location, createdAt: Date.now(), tieStrategy, phase: "nominations", round: 0,
+    members: {}, preferences: {}, restaurants: {}, candidateIds: [], votes: {}, initialVotes: {},
+    winnerId: null, reaskReason: null, feedback: {} };
+}
+export function requireMember(group: GroupData, uid: string): Preference {
+  if (!Object.hasOwn(group.members, uid)) throw new RoomError("Join this group first.", 403);
+  return group.preferences[uid];
+}
+export function requireNominations(group: GroupData) {
+  if (group.phase !== "nominations") throw new RoomError("Nominations are closed for this vote.", 409);
+}
+export function joinMember(group: GroupData, uid: string, name: string, defaults: PreferenceInput = {}) {
+  if (Object.hasOwn(group.members, uid)) return;
+  requireNominations(group);
+  if (Object.keys(group.members).length >= 30) throw new RoomError("This group is full.", 409);
+  group.members[uid] = { name };
+  group.preferences[uid] = { memberId: uid, budgetRanges: defaults.budgetRanges ?? [...ALL_BUDGET_RANGES],
+    favorites: defaults.favorites ?? [], readyToVote: false,
+    distanceCapMiles: defaults.distanceCapMiles ?? null, hostLocation: defaults.hostLocation ?? null,
+    dietaryNeeds: [] };
+  resetReady(group);
+}
+export function resetReady(group: GroupData) {
+  for (const preference of Object.values(group.preferences)) preference.readyToVote = false;
+}
+export function updatePreferences(group: GroupData, uid: string, input: PreferenceInput) {
+  const preference = requireMember(group, uid);
+  requireNominations(group);
+  if (input.budgetRanges !== undefined) preference.budgetRanges = budgets(input.budgetRanges);
+  if (input.favorites !== undefined) preference.favorites = names(input.favorites);
+  if (input.distanceCapMiles !== undefined) preference.distanceCapMiles = distanceCap(input.distanceCapMiles);
+  if (input.hostLocation !== undefined) preference.hostLocation = input.hostLocation;
+  if (input.dietaryNeeds !== undefined) preference.dietaryNeeds = dietaryNeeds(input.dietaryNeeds);
+  if (input.budgetRanges !== undefined || input.favorites !== undefined || input.distanceCapMiles !== undefined || input.hostLocation !== undefined || input.dietaryNeeds !== undefined) {
+    resetReady(group);
+    group.reaskReason = null;
   }
-
-  if (typeof value === "number") {
-    if (value <= 1) return ["UNDER_10"];
-    if (value === 2) return ["UNDER_10", "TEN_TO_THIRTY"];
-    if (value === 3) return ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY"];
-    return [...ALL_BUDGET_RANGES];
+  // Remove only records no member still nominates (shared nominations survive).
+  const active = new Set(Object.values(group.preferences).flatMap((p) => p.favorites.map(restaurantNameKey)));
+  for (const [key, restaurant] of Object.entries(group.restaurants)) {
+    if (!active.has(restaurantNameKey(restaurant.name))) delete group.restaurants[key];
   }
-
-  if (!value || typeof value !== "object") {
-    return undefined;
+}
+export function eligibleRestaurants(group: GroupData): Restaurant[] {
+  const preferences = Object.values(group.preferences);
+  const active = new Set(preferences.flatMap((p) => p.favorites.map(restaurantNameKey)));
+  const needs = groupDietaryNeeds(group);
+  return Object.values(group.restaurants).filter((restaurant) => active.has(restaurantNameKey(restaurant.name)) &&
+    passesDietaryNeeds(restaurant, needs) &&
+    preferences.every((preference) => restaurant.budgetRange === null
+      ? ALL_BUDGET_RANGES.every((range) => preference.budgetRanges.includes(range))
+      : preference.budgetRanges.includes(restaurant.budgetRange)));
+}
+export function markReady(group: GroupData, uid: string, ready: boolean) {
+  const preference = requireMember(group, uid);
+  requireNominations(group);
+  if (typeof ready !== "boolean") throw new RoomError("Invalid readiness value.");
+  preference.readyToVote = ready;
+  if (!Object.values(group.preferences).every((p) => p.readyToVote)) return;
+  const candidates = eligibleRestaurants(group);
+  if (candidates.length === 0) {
+    resetReady(group);
+    group.reaskReason = "No restaurants survived the group's constraints. Please add more restaurants with known prices or widen your budget ranges.";
+    return;
   }
-
-  const maybeRanges = (value as { budgetRanges?: unknown }).budgetRanges;
-  if (Array.isArray(maybeRanges)) {
-    const ranges = maybeRanges.filter(isBudgetRange);
-    if (ranges.length) {
-      return Array.from(new Set(ranges));
-    }
+  group.candidateIds = candidates.map((r) => r.id);
+  group.phase = "voting";
+  group.reaskReason = null;
+}
+export function castVote(group: GroupData, uid: string, ids: unknown, round: unknown, random: () => number = Math.random) {
+  requireMember(group, uid);
+  if ((group.phase !== "voting" && group.phase !== "runoff") || round !== group.round) {
+    throw new RoomError("This voting round is closed. Refresh the ballot.", 409);
   }
-
-  const candidate = value as { min?: unknown; max?: unknown };
-  const min = typeof candidate.min === "number" ? candidate.min : 1;
-  const max = typeof candidate.max === "number" ? candidate.max : 4;
-
-  return ALL_BUDGET_RANGES.filter((_, index) => {
-    const tier = index + 1;
-    return tier >= Math.min(min, max) && tier <= Math.max(min, max);
-  });
-}
-
-function isPriceLevel(value: unknown): value is PriceLevel {
-  return typeof value === "string" && value in priceLevelToBudgetRange;
-}
-
-function passesBudgetRanges(
-  restaurant: Restaurant,
-  preferences: Preference[],
-): boolean {
-  return preferences.every((pref) =>
-    pref.budgetRanges.length === 0 ||
-    pref.budgetRanges.includes(restaurant.budgetRange),
-  );
-}
-
-// Yelp categories only say what a restaurant is known for, so a missing tag means "unknown",
-// not "doesn't accommodate". false = keep unknown restaurants (labeled in the UI),
-// true = drop them. This is the switch for the keep-vs-prune A/B test.
-export const PRUNE_UNKNOWN_DIETARY = false;
-
-export function passesDietaryNeeds(
-  restaurant: Restaurant,
-  preferences: Preference[],
-  pruneUnknown = PRUNE_UNKNOWN_DIETARY,
-): boolean {
-  if (!pruneUnknown) return true;
-  const tags = restaurant.dietaryTags ?? [];
-  return preferences.every((pref) => pref.dietaryNeeds.every((need) => tags.includes(need)));
-}
-
-// Every dietary need anyone in the group selected, for labeling restaurant cards.
-export function groupDietaryNeeds(preferences: Preference[]): DietaryTag[] {
-  return Array.from(new Set(preferences.flatMap((pref) => pref.dietaryNeeds)));
-}
-
-export async function createGroup(
-  input: {
-    groupName?: string;
-    location?: string;
-  } = {},
-) {
-  const roomRef = await addDoc(collection(db, "rooms"), {
-    groupName: input.groupName || "Untitled Group",
-    location: input.location || "Unknown",
-    createdAt: serverTimestamp(),
-  });
-
-  return { roomId: roomRef.id, joinPath: `/join/${roomRef.id}` };
-}
-
-export async function joinGroup(
-  roomId: string,
-  name = "Anonymous",
-  memberId = uuid(),
-) {
-  const roomRef = doc(db, "rooms", roomId);
-  const roomSnap = await getDoc(roomRef);
-
-  if (!roomSnap.exists()) {
-    await setDoc(roomRef, {
-      groupName: "Untitled Group",
-      location: "Unknown",
-      createdAt: serverTimestamp(),
-    });
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > group.candidateIds.length ||
+      ids.some((id) => typeof id !== "string" || !group.candidateIds.includes(id))) throw new RoomError("Select eligible restaurants.");
+  const unique = [...new Set(ids)] as string[];
+  if (group.phase === "runoff" && unique.length !== 1) throw new RoomError("Choose exactly one restaurant in the runoff.");
+  group.votes[uid] = unique;
+  if (!Object.keys(group.members).every((id) => group.votes[id]?.length)) return;
+  const tally = tallyVotes(group);
+  const max = Math.max(...Object.values(tally));
+  const tied = group.candidateIds.filter((id) => tally[id] === max);
+  if (tied.length > 1 && group.tieStrategy === "runoff" && group.round === 0) {
+    group.initialVotes = group.votes;
+    group.votes = {};
+    group.candidateIds = tied;
+    group.round = 1;
+    group.phase = "runoff";
+    return;
   }
-
-  await setDoc(doc(db, "rooms", roomId, "members", memberId), {
-    name,
-    joinedAt: serverTimestamp(),
-  });
-
-  return { memberId };
+  group.winnerId = tied.length === 1 ? tied[0] : tied[Math.min(tied.length - 1, Math.floor(random() * tied.length))];
+  group.phase = "results";
 }
-
-export async function submitPreferences(
-  roomId: string,
-  memberId: string,
-  input: PreferenceInput,
-) {
-  const prefRef = doc(db, "rooms", roomId, "preferences", memberId);
-  const existingSnap = await getDoc(prefRef);
-
-  const existingFavorites = existingSnap.exists()
-    ? ((existingSnap.get("favorites") as string[] | undefined) ?? [])
-    : [];
-  const nextFavorites = dedupeNames([
-    ...existingFavorites,
-    ...(input.favorites ?? []),
-  ]);
-
-  const existingBudgetRanges = existingSnap.exists()
-    ? toBudgetRanges(existingSnap.get("budgetRanges") ?? existingSnap.get("budgetCap"))
-    : undefined;
-  const nextBudgetRanges =
-    toBudgetRanges(input.budgetRanges) ??
-    existingBudgetRanges ??
-    [...ALL_BUDGET_RANGES];
-
-  const existingReadyToVote = existingSnap.exists()
-    ? Boolean(existingSnap.get("readyToVote"))
-    : false;
-
-  await setDoc(
-    prefRef,
-    {
-      budgetRanges: nextBudgetRanges,
-      favorites: nextFavorites,
-      readyToVote:
-        typeof input.readyToVote === "boolean"
-          ? input.readyToVote
-          : existingReadyToVote,
-      ...(input.dietaryNeeds
-        ? { dietaryNeeds: input.dietaryNeeds.filter(isDietaryTag) }
-        : {}),
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
-
-  const nominatedRestaurants = dedupeNames(input.favorites ?? []).map((name) =>
-    resolveRestaurant(name),
-  );
-
-  await Promise.all(
-    nominatedRestaurants.map((restaurant) =>
-      setDoc(
-        doc(db, "rooms", roomId, "restaurants", restaurant.id),
-        {
-          ...restaurant,
-          nominatedByMemberIds: arrayUnion(memberId),
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true },
-      ),
-    ),
-  );
-}
-
-// Saves a restaurant picked from Google Places search with its real details.
-// Typed-in names still go through submitPreferences / resolveRestaurant.
-export async function nominatePlace(
-  roomId: string,
-  memberId: string,
-  place: NominatedPlace,
-) {
-  const priceLevel = isPriceLevel(place.priceLevel) ? place.priceLevel : undefined;
-  // unknown prices default to $10-$30 for pruning until we decide keep-vs-prune
-  const budgetRange = priceLevel
-    ? priceLevelToBudgetRange[priceLevel]
-    : "TEN_TO_THIRTY";
-
-  // Firestore rejects undefined values, so optional fields are only added when present
-  await setDoc(
-    doc(db, "rooms", roomId, "restaurants", `place-${place.placeId}`),
-    {
-      name: place.name,
-      cuisine: place.cuisine,
-      placeId: place.placeId,
-      address: place.address,
-      budgetRange,
-      priceLabel: priceLevel ? budgetRangeLabels[budgetRange] : "Price unknown",
-      ...(priceLevel ? { priceLevel } : {}),
-      ...(place.distanceMiles !== null ? { distanceMiles: place.distanceMiles } : {}),
-      rating: place.rating ?? 0,
-      reviewCount: place.userRatingCount ?? 0,
-      ...(place.photoName ? { photoName: place.photoName } : {}),
-      mapsUrl: place.mapsUrl,
-      website: place.website,
-      dietaryTags: place.dietaryTags.filter(isDietaryTag),
-      dietaryChecked: place.dietaryChecked,
-      yelpUrl: place.yelpUrl,
-      nominatedByMemberIds: arrayUnion(memberId),
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
-
-  await setDoc(
-    doc(db, "rooms", roomId, "preferences", memberId),
-    { favorites: arrayUnion(place.name), updatedAt: serverTimestamp() },
-    { merge: true },
-  );
-}
-
-export async function markMemberReadyForVoting(
-  roomId: string,
-  memberId: string,
-  readyToVote = true,
-) {
-  await submitPreferences(roomId, memberId, { readyToVote, favorites: [] });
-}
-
-export async function submitVotes(
-  roomId: string,
-  memberId: string,
-  restaurantIds: string[],
-) {
-  await setDoc(
-    doc(db, "rooms", roomId, "votes", memberId),
-    {
-      restaurantIds,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
-
-  const [votesSnap, restaurantsSnap] = await Promise.all([
-    getDocs(collection(db, "rooms", roomId, "votes")),
-    getDocs(collection(db, "rooms", roomId, "restaurants")),
-  ]);
-
-  const voteCount = new Map<string, number>();
-  for (const vote of votesSnap.docs) {
-    const ids = (vote.get("restaurantIds") as string[] | undefined) || [];
-    for (const restaurantId of ids) {
-      voteCount.set(restaurantId, (voteCount.get(restaurantId) || 0) + 1);
-    }
+export function tallyVotes(group: GroupData): Record<string, number> {
+  const tally: Record<string, number> = Object.fromEntries(group.candidateIds.map((id) => [id, 0]));
+  for (const uid of Object.keys(group.members)) {
+    for (const id of new Set(group.votes[uid] ?? [])) if (Object.hasOwn(tally, id)) tally[id]++;
   }
-
-  const batch = writeBatch(db);
-  for (const restaurant of restaurantsSnap.docs) {
-    batch.set(
-      restaurant.ref,
-      {
-        votes: voteCount.get(restaurant.id) || 0,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  }
-
-  await batch.commit();
+  return tally;
 }
-
-export async function getRoomState(roomId: string): Promise<RoomState | null> {
-  const roomRef = doc(db, "rooms", roomId);
-  const [roomSnap, memberSnap, prefSnap, voteSnap, restaurantSnap] = await Promise.all([
-    getDoc(roomRef),
-    getDocs(collection(db, "rooms", roomId, "members")),
-    getDocs(collection(db, "rooms", roomId, "preferences")),
-    getDocs(collection(db, "rooms", roomId, "votes")),
-    getDocs(collection(db, "rooms", roomId, "restaurants")),
-  ]);
-
-  if (!roomSnap.exists()) {
-    return null;
-  }
-
-  const preferences: Preference[] = prefSnap.docs.map((item) => ({
-    memberId: item.id,
-    budgetRanges:
-      toBudgetRanges(item.get("budgetRanges") ?? item.get("budgetCap")) ??
-      [...ALL_BUDGET_RANGES],
-    favorites: dedupeNames((item.get("favorites") as string[] | undefined) || []),
-    readyToVote: Boolean(item.get("readyToVote")),
-    dietaryNeeds: ((item.get("dietaryNeeds") as unknown[] | undefined) || []).filter(isDietaryTag),
-  }));
-
-  const members = memberSnap.docs.map((item) => ({
-    id: item.id,
-    name: item.get("name") || "Anonymous",
-  }));
-  const votes = voteSnap.docs.map((item) => ({
-    memberId: item.id,
-    restaurantIds: (item.get("restaurantIds") as string[] | undefined) || [],
-  }));
-
-  const allRestaurants: Restaurant[] = restaurantSnap.docs.map((item) => {
-    const priceLevel = item.get("priceLevel") as PriceLevel | undefined;
-    const budgetRange =
-      (item.get("budgetRange") as BudgetRange | undefined) ||
-      (priceLevel ? priceLevelToBudgetRange[priceLevel] : "TEN_TO_THIRTY");
-
-    return {
-      id: item.id,
-      name: (item.get("name") as string | undefined) || item.id,
-      cuisine: (item.get("cuisine") as string | undefined) || "Custom",
-      priceLevel,
-      budgetRange,
-      priceLabel:
-        (item.get("priceLabel") as string | undefined) ||
-        budgetRangeLabels[budgetRange],
-      distanceMiles: (item.get("distanceMiles") as number | undefined) ?? null,
-      rating: (item.get("rating") as number | undefined) ?? 4,
-      reviewCount: (item.get("reviewCount") as number | undefined) ?? 0,
-      placeId: item.get("placeId") as string | undefined,
-      address: item.get("address") as string | undefined,
-      photoName: item.get("photoName") as string | undefined,
-      mapsUrl: item.get("mapsUrl") as string | undefined,
-      website: item.get("website") as string | undefined,
-      dietaryTags: ((item.get("dietaryTags") as unknown[] | undefined) || []).filter(isDietaryTag),
-      dietaryChecked: Boolean(item.get("dietaryChecked")),
-      yelpUrl: item.get("yelpUrl") as string | undefined,
-    };
-  });
-
-  const fallbackRestaurants = Array.from(
-    new Set(
-      preferences
-        .flatMap((pref) => pref.favorites)
-        .filter(Boolean),
-    ),
-  ).map((name) => resolveRestaurant(name));
-
-  const sourceRestaurants = allRestaurants.length ? allRestaurants : fallbackRestaurants;
-
-  const options = sourceRestaurants.filter((restaurant) =>
-    passesBudgetRanges(restaurant, preferences) &&
-    passesDietaryNeeds(restaurant, preferences),
-  );
-
-  const voteCount = new Map<string, number>();
-  const votesByMember: Record<string, string[]> = {};
-  for (const vote of votes) {
-    votesByMember[vote.memberId] = vote.restaurantIds;
-    for (const restaurantId of vote.restaurantIds) {
-      voteCount.set(restaurantId, (voteCount.get(restaurantId) || 0) + 1);
-    }
-  }
-
-  const ranked = options
-    .map((restaurant) => ({
-      ...restaurant,
-      votes: voteCount.get(restaurant.id) || 0,
-    }))
-    .sort((a, b) => b.votes - a.votes || b.rating - a.rating);
-
-  const readyMemberIds = preferences
-    .filter((pref) => pref.readyToVote)
-    .map((pref) => pref.memberId);
-
-  const allMembersReadyToVote =
-    members.length > 0 && members.every((member) => readyMemberIds.includes(member.id));
-
-  const allMembersVoted =
-    members.length > 0 &&
-    members.every((member) => (votesByMember[member.id] || []).length > 0);
-
-  const hasTie =
-    ranked.length > 1 && ranked[0].votes > 0 && ranked[0].votes === ranked[1].votes;
-
+export function recordFeedback(group: GroupData, uid: string, happy: unknown) {
+  requireMember(group, uid);
+  if (group.phase !== "results" || !group.winnerId) throw new RoomError("Feedback opens after the final result.", 409);
+  if (typeof happy !== "boolean") throw new RoomError("Feedback must be yes or no.");
+  group.feedback[uid] = { happy, restaurantId: group.winnerId, updatedAt: Date.now() };
+}
+export function roomView(group: GroupData, roomId: string, uid: string): RoomState {
+  const member = Object.hasOwn(group.members, uid);
+  const mine = member ? group.preferences[uid] : undefined;
+  const revealed = member && group.phase !== "nominations";
+  const source = revealed ? group.candidateIds.map((id) => group.restaurants[id]) :
+    member ? Object.values(group.restaurants).filter((r) => mine?.favorites.some((name) => restaurantNameKey(name) === restaurantNameKey(r.name))) : [];
+  const tally = tallyVotes(group);
+  const options = source.map((r) => ({ ...r,
+    distanceMiles: coordinates(mine?.hostLocation ?? null) && coordinates(r) ?
+      milesBetween(mine!.hostLocation!.lat!, mine!.hostLocation!.lng!, r.lat, r.lng) : r.distanceMiles,
+    votes: revealed ? tally[r.id] ?? 0 : 0 })).sort((a, b) => b.votes - a.votes || a.name.localeCompare(b.name));
+  const readyMemberIds = Object.values(group.preferences).filter((p) => p.readyToVote).map((p) => p.memberId);
   return {
-    room: { id: roomSnap.id, ...roomSnap.data() },
-    members,
-    preferences,
-    options: ranked,
-    winner: ranked[0] || null,
-    votesByMember,
-    readyMemberIds,
-    allMembersReadyToVote,
-    allMembersVoted,
-    hasTie,
+    room: { id: roomId, groupName: group.groupName, location: group.location },
+    members: Object.entries(group.members).map(([id, m]) => ({ id, name: m.name })),
+    // Prototype UI projection; the underlying room document is readable by signed-in clients.
+    preferences: mine ? [mine] : [],
+    memberDistances: mine ? { [uid]: { location: mine.hostLocation, distanceCapMiles: mine.distanceCapMiles } } : {},
+    options, winner: options.find((r) => r.id === group.winnerId) ?? null,
+    votesByMember: revealed ? group.votes : {}, readyMemberIds,
+    allMembersReadyToVote: group.phase !== "nominations", allMembersVoted: group.phase === "results",
+    hasTie: group.phase === "runoff" || (options.length > 1 && options[0].votes > 0 && options[0].votes === options[1].votes && !group.winnerId),
+    distanceCapMiles: mine?.distanceCapMiles ?? null, hostLocation: mine?.hostLocation ?? null,
+    distanceFilteringAvailable: false,
+    groupDietaryNeeds: member ? groupDietaryNeeds(group) : [],
+    phase: group.phase, round: group.round, tieStrategy: group.tieStrategy,
+    reaskReason: member ? group.reaskReason : null, feedback: mine && group.feedback[uid] ? { [uid]: group.feedback[uid] } : {},
+    satisfactionByMember: member && group.phase === "results"
+      ? Object.fromEntries(Object.entries(group.feedback)
+        .filter(([id, response]) => Object.hasOwn(group.members, id) && response.restaurantId === group.winnerId)
+        .map(([id, response]) => [id, response.happy])) : {},
   };
 }
 
-export function subscribeRoomState(
-  roomId: string,
-  onChange: (state: RoomState | null) => void,
-  onError?: (error: Error) => void,
-): Unsubscribe {
-  const watchers = [
-    onSnapshot(doc(db, "rooms", roomId), emit, emitError),
-    onSnapshot(collection(db, "rooms", roomId, "members"), emit, emitError),
-    onSnapshot(collection(db, "rooms", roomId, "preferences"), emit, emitError),
-    onSnapshot(collection(db, "rooms", roomId, "restaurants"), emit, emitError),
-    onSnapshot(collection(db, "rooms", roomId, "votes"), emit, emitError),
-  ];
+export type Profile = {
+  displayName: string;
+  favorites: string[];
+  budgetRanges: BudgetRange[];
+  distanceCapMiles: number | null;
+  hostLocation: { lat?: number; lng?: number; address?: string } | null;
+};
 
-  async function emit() {
-    try {
-      onChange(await getRoomState(roomId));
-    } catch (error) {
-      emitError(error);
-    }
+const budgetRanges: BudgetRange[] = [
+  "UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS",
+];
+
+export function defaultProfile(displayName = ""): Profile {
+  return {
+    displayName,
+    favorites: [],
+    budgetRanges: [...budgetRanges],
+    distanceCapMiles: null,
+    hostLocation: null,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function validateProfile(input: unknown): Profile {
+  if (!isRecord(input) || Object.keys(input).some((key) => ![
+    "displayName", "favorites", "budgetRanges", "distanceCapMiles", "hostLocation",
+  ].includes(key))) {
+    throw new RoomError("Invalid profile fields.");
+  }
+  if (typeof input.displayName !== "string" || input.displayName.trim().length > 100) {
+    throw new RoomError("Display name must be a string of at most 100 characters.");
+  }
+  if (!Array.isArray(input.favorites) || input.favorites.length > 30 ||
+      input.favorites.some((value) => typeof value !== "string" || !value.trim() || value.trim().length > 200)) {
+    throw new RoomError("Favorites must contain at most 30 nonempty strings of at most 200 characters.");
+  }
+  if (!Array.isArray(input.budgetRanges) || input.budgetRanges.length === 0 ||
+      input.budgetRanges.length > budgetRanges.length ||
+      input.budgetRanges.some((value) => !budgetRanges.includes(value)) ||
+      new Set(input.budgetRanges).size !== input.budgetRanges.length) {
+    throw new RoomError("Budget ranges must contain distinct supported budgets.");
+  }
+  if (input.distanceCapMiles !== null && (typeof input.distanceCapMiles !== "number" ||
+      !Number.isFinite(input.distanceCapMiles) || input.distanceCapMiles <= 0 || input.distanceCapMiles > 500)) {
+    throw new RoomError("Distance cap must be a positive finite number of at most 500 miles or null.");
   }
 
+  let hostLocation: Profile["hostLocation"] = null;
+  if (input.hostLocation !== null) {
+    const location = input.hostLocation;
+    if (!isRecord(location) || Object.keys(location).some((key) => !["lat", "lng", "address"].includes(key))) {
+      throw new RoomError("Invalid host location fields.");
+    }
+    for (const [field, limit] of [["lat", 90], ["lng", 180]] as const) {
+      if (field in location && (typeof location[field] !== "number" ||
+          !Number.isFinite(location[field]) || Math.abs(location[field]) > limit)) {
+        throw new RoomError(`Invalid host location ${field}.`);
+      }
+    }
+    if ("address" in location && (typeof location.address !== "string" || location.address.trim().length > 500)) {
+      throw new RoomError("Host address must be a string of at most 500 characters.");
+    }
+    hostLocation = {
+      ...("lat" in location ? { lat: location.lat as number } : {}),
+      ...("lng" in location ? { lng: location.lng as number } : {}),
+      ...("address" in location ? { address: (location.address as string).trim() } : {}),
+    };
+  }
+
+  return {
+    displayName: input.displayName.trim(),
+    favorites: [...new Set(input.favorites.map((value: string) => value.trim()))],
+    budgetRanges: [...input.budgetRanges],
+    distanceCapMiles: input.distanceCapMiles,
+    hostLocation,
+  };
+}
+
+export function userErrorMessage(error: unknown, fallback = "Something went wrong. Please try again."): string {
+  const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  const messages: Record<string, string> = {
+    "auth/invalid-credential": "The email or password is incorrect.",
+    "auth/wrong-password": "The email or password is incorrect.",
+    "auth/user-not-found": "The email or password is incorrect.",
+    "auth/invalid-email": "Please enter a valid email address.",
+    "auth/missing-password": "Please enter your password.",
+    "auth/weak-password": "Please choose a password with at least 6 characters.",
+    "auth/email-already-in-use": "An account with this email already exists. Please log in instead.",
+    "auth/user-disabled": "This account is unavailable. Please contact support.",
+    "auth/too-many-requests": "Too many attempts. Please wait a moment and try again.",
+    "auth/network-request-failed": "Unable to connect. Check your internet connection and try again.",
+    "auth/configuration-not-found": "Account access is temporarily unavailable. Please try again later.",
+    "auth/operation-not-allowed": "This sign-in option is currently unavailable. Please try again later.",
+    "auth/admin-restricted-operation": "Guest access is currently unavailable. Please try again later.",
+    "auth/requires-recent-login": "Please log in again before making this change.",
+    "permission-denied": "We couldn't access this information. Please try again or contact the group organizer.",
+    "unavailable": "Unable to connect. Check your internet connection and try again.",
+    "deadline-exceeded": "The request took too long. Please try again.",
+  };
+  if (typeof code === "string") return messages[code] ?? fallback;
+  if (error instanceof Error && !/firebase|auth\/|firestore\//i.test(error.message)) return error.message;
+  return fallback;
+}
+
+export function authErrorMessage(error: unknown, mode: "guest" | "account" = "account"): string {
+  const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  if (mode === "guest" && ["auth/configuration-not-found", "auth/operation-not-allowed", "auth/admin-restricted-operation"].includes(String(code))) {
+    return "Guest access is temporarily unavailable. Please try again later. You do not need to create an account.";
+  }
+  return userErrorMessage(error, "Unable to sign in. Please try again.");
+}
+
+export type Account = { uid: string; name: string };
+export function subscribeAccount(onChange: (account: Account | null) => void): () => void {
+  return onAuthStateChanged(auth, (user) => {
+    onChange(user && !user.isAnonymous ? {
+      uid: user.uid,
+      name: user.displayName?.trim() || user.email?.split("@")[0] || "Member",
+    } : null);
+  });
+}
+
+export async function signUp(email: string, password: string, name: string) {
+  const displayName = name.trim();
+  if (!displayName || displayName.length > 100) {
+    throw new Error("Name must contain between 1 and 100 characters.");
+  }
+  await auth.authStateReady();
+  const user = auth.currentUser;
+  const credential = user?.isAnonymous
+    ? await linkWithCredential(user, EmailAuthProvider.credential(email.trim(), password))
+    : await createUserWithEmailAndPassword(auth, email.trim(), password);
+  await updateProfile(credential.user, { displayName });
+  await credential.user.getIdToken(true);
+  await saveProfile({
+    displayName,
+    favorites: [],
+    budgetRanges: ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"],
+    distanceCapMiles: null,
+    hostLocation: null,
+  });
+  return credential;
+}
+
+export function logIn(email: string, password: string) {
+  return signInWithEmailAndPassword(auth, email.trim(), password);
+}
+
+export function logOut() {
+  return signOut(auth);
+}
+
+let pendingGuest: Promise<User> | null = null;
+async function currentUser(): Promise<User> {
+  await auth.authStateReady();
+  if (auth.currentUser) return auth.currentUser;
+  pendingGuest ??= signInAnonymously(auth)
+    .then((credential) => credential.user)
+    .catch((error) => { throw new Error(authErrorMessage(error, "guest")); })
+    .finally(() => { pendingGuest = null; });
+  return pendingGuest;
+}
+
+function roomRef(roomId: string) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(roomId)) throw new RoomError("Invalid room ID.");
+  return doc(db, "rooms", roomId);
+}
+function groupData(data: unknown): GroupData {
+  if (!data) throw new RoomError("Group not found.", 404);
+  if ((data as GroupData).version !== 2) throw new RoomError("This group uses the old voting format. Please create a new group.", 409);
+  return data as GroupData;
+}
+
+export function createNomination(name: string): Restaurant {
+  const trimmed = text(name, "restaurant name");
+  return { id: `nomination-${trimmed.toLowerCase()}`, name: trimmed, cuisine: "Restaurant",
+    budgetRange: null, priceLabel: "Price unavailable", distanceMiles: null, rating: 0, reviewCount: 0 };
+}
+function prepareNominations(group: GroupData, favorites: string[], selectedRestaurants: Restaurant[] = []): string[] {
+  const selectedByName = new Map(selectedRestaurants.map((restaurant) => [restaurantNameKey(restaurant.name), restaurant]));
+  return names(favorites).map((name) => {
+    const nameKey = restaurantNameKey(name);
+    const restaurant = selectedByName.get(nameKey) ??
+      Object.values(group.restaurants).find((item) => restaurantNameKey(item.name) === nameKey) ??
+      createNomination(name);
+    for (const [id, existing] of Object.entries(group.restaurants)) {
+      if (restaurantNameKey(existing.name) === nameKey && id !== restaurant.id) {
+        delete group.restaurants[id];
+      }
+    }
+    group.restaurants[restaurant.id] = restaurant;
+    return restaurant.name;
+  });
+}
+
+export async function createGroup(input: { groupName?: string; location?: string; tieStrategy?: TieStrategy } = {}) {
+  await currentUser();
+  const strategy = input.tieStrategy ?? (Math.random() < 0.5 ? "random" : "runoff");
+  if (strategy !== "random" && strategy !== "runoff") throw new RoomError("Invalid tie strategy.");
+  const group = newGroup(text(input.groupName ?? "Untitled Group", "group name", 100), text(input.location ?? "Unknown", "group location", 500), strategy);
+  const ref = await addDoc(collection(db, "rooms"), group);
+  return { roomId: ref.id, joinPath: `/room/${ref.id}`, tieStrategy: strategy };
+}
+
+export async function joinGroup(roomId: string, name = "Anonymous", _memberId?: string) {
+  void _memberId;
+  const user = await currentUser();
+  const ref = roomRef(roomId);
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    const group = groupData(snapshot.data());
+    let defaults: PreferenceInput = {};
+    if (!Object.hasOwn(group.members, user.uid) && !user.isAnonymous) {
+      const profile = await transaction.get(doc(db, "profiles", user.uid));
+      if (profile.exists()) defaults = validateProfile(profile.data());
+    }
+    if (defaults.favorites) defaults.favorites = prepareNominations(group, defaults.favorites);
+    joinMember(group, user.uid, text(name, "member name", 100), defaults);
+    transaction.set(ref, group);
+    return { memberId: user.uid, state: roomView(group, roomId, user.uid) };
+  });
+}
+
+async function changeRoom(roomId: string, memberId: string | undefined, change: (group: GroupData, uid: string) => void) {
+  const user = await currentUser();
+  if (memberId !== undefined && user.uid !== memberId) throw new RoomError("Rejoin the group with your current account.");
+  const ref = roomRef(roomId);
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    const group = groupData(snapshot.data());
+    requireMember(group, user.uid);
+    change(group, user.uid);
+    transaction.set(ref, group);
+    return { memberId: user.uid, state: roomView(group, roomId, user.uid) };
+  });
+}
+
+export function submitPreferences(roomId: string, memberId: string, input: PreferenceInput) {
+  return changeRoom(roomId, memberId, (group, uid) => {
+    const next = { ...input };
+    if (next.favorites !== undefined) next.favorites = prepareNominations(group, next.favorites, next.restaurants);
+    if (next.hostLocation !== undefined) next.hostLocation = locationInput(next.hostLocation);
+    updatePreferences(group, uid, next);
+    if (next.readyToVote !== undefined) markReady(group, uid, next.readyToVote);
+  });
+}
+export function updateRoomDistance(roomId: string, input: { distanceCapMiles: number | null; hostLocation: HostLocation | null }) {
+  return changeRoom(roomId, undefined, (group, uid) => updatePreferences(group, uid, {
+    distanceCapMiles: distanceCap(input.distanceCapMiles), hostLocation: locationInput(input.hostLocation),
+  }));
+}
+export function updateMemberDistance(roomId: string, memberId: string, input: MemberDistance) {
+  return submitPreferences(roomId, memberId, { distanceCapMiles: input.distanceCapMiles, hostLocation: input.location });
+}
+export function markMemberReadyForVoting(roomId: string, memberId: string, readyToVote = true) {
+  return changeRoom(roomId, memberId, (group, uid) => markReady(group, uid, readyToVote));
+}
+export function submitVotes(roomId: string, memberId: string, restaurantIds: string[], round = 0) {
+  // Keep the draw stable if Firestore retries the transaction.
+  const random = Math.random();
+  return changeRoom(roomId, memberId, (group, uid) => castVote(group, uid, restaurantIds, round, () => random));
+}
+export function removeNomination(roomId: string, memberId: string, name: string) {
+  return changeRoom(roomId, memberId, (group, uid) => updatePreferences(group, uid, {
+    favorites: group.preferences[uid].favorites.filter((favorite) => restaurantNameKey(favorite) !== restaurantNameKey(name)),
+  }));
+}
+export function submitResultFeedback(roomId: string, memberId: string, happy: boolean) {
+  return changeRoom(roomId, memberId, (group, uid) => recordFeedback(group, uid, happy));
+}
+export async function getRoomState(roomId: string): Promise<RoomState | null> {
+  const user = await currentUser();
+  const snapshot = await getDoc(roomRef(roomId));
+  return snapshot.exists() ? roomView(groupData(snapshot.data()), roomId, user.uid) : null;
+}
+export function subscribeRoomState(roomId: string, onChange: (state: RoomState | null) => void, onError?: (error: Error) => void): () => void {
+  let stopped = false;
+  let unsubscribe: (() => void) | undefined;
   function emitError(error: unknown) {
-    if (onError) {
-      onError(error as Error);
-    }
+    if (!stopped) onError?.(new Error(userErrorMessage(error, "Unable to load room. Please try again.")));
   }
+  void currentUser().then((user) => {
+    if (stopped) return;
+    unsubscribe = onSnapshot(roomRef(roomId), (snapshot) => {
+      if (stopped) return;
+      try { onChange(snapshot.exists() ? roomView(groupData(snapshot.data()), roomId, user.uid) : null); }
+      catch (error) { emitError(error); }
+    }, emitError);
+  }).catch(emitError);
+  return () => { stopped = true; unsubscribe?.(); };
+}
 
-  emit();
-  return () => watchers.forEach((stop) => stop());
+async function accountUser() {
+  await auth.authStateReady();
+  if (!auth.currentUser || auth.currentUser.isAnonymous) throw new RoomError("Sign in to access your profile.");
+  return auth.currentUser;
+}
+export async function getProfile(): Promise<Profile> {
+  const user = await accountUser();
+  const snapshot = await getDoc(doc(db, "profiles", user.uid));
+  return snapshot.exists() ? validateProfile(snapshot.data()) : defaultProfile(user.displayName ?? "");
+}
+export async function saveProfile(input: Profile): Promise<Profile> {
+  const user = await accountUser();
+  const profile = validateProfile(input);
+  await setDoc(doc(db, "profiles", user.uid), profile);
+  return profile;
 }

@@ -1,14 +1,15 @@
 "use client";
 import { useEffect, useState } from "react";
+import type { HostLocation } from "../../backend/AppBackend";
 import { isValidCoordinate, type GroupCenter } from "../../lib/places";
 
 // Where restaurant search and "x mi away" are measured from.
-// Uses exact coordinates on the room if they exist (e.g. from location permission),
+// Uses the member's own starting location if they shared one (location permission or address),
 // otherwise looks up the city/ZIP the host typed when creating the group.
-export function useGroupCenter(room?: Record<string, unknown> | null): GroupCenter | null {
+export function useGroupCenter(room?: Record<string, unknown> | null, hostLocation?: HostLocation | null): GroupCenter | null {
     const location = typeof room?.location === "string" ? room.location.trim() : "";
-    const latitude = room?.latitude;
-    const longitude = room?.longitude;
+    const latitude = hostLocation?.lat;
+    const longitude = hostLocation?.lng;
     const hasExact = isValidCoordinate(latitude, longitude);
     const [geocoded, setGeocoded] = useState<{ query: string; center: GroupCenter } | null>(null);
 
@@ -24,7 +25,11 @@ export function useGroupCenter(room?: Record<string, unknown> | null): GroupCent
     }, [hasExact, location]);
 
     if (hasExact) {
-        return { latitude: latitude as number, longitude: longitude as number, label: location || "your group" };
+        return {
+            latitude: latitude as number,
+            longitude: longitude as number,
+            label: hostLocation?.address || "your location",
+        };
     }
     return geocoded?.query === location ? geocoded.center : null;
 }

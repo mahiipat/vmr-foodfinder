@@ -4,18 +4,21 @@ import { useRouter } from "next/navigation";
 import {
   ALL_BUDGET_RANGES,
   budgetRangeLabels,
-  groupDietaryNeeds,
   markMemberReadyForVoting,
-  nominatePlace,
+  removeNomination,
+  restaurantNameKey,
   submitPreferences,
   subscribeRoomState,
+  userErrorMessage,
   type BudgetRange,
+  type Restaurant,
   type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
 import { trackEvent, trackScreen } from "../../../../lib/analytics";
 import { lookupDietary, type DietaryTag } from "../../../../lib/dietary";
-import type { PlaceResult } from "../../../../lib/places";
+import { placeToRestaurant, type PlaceResult } from "../../../../lib/places";
+import LocationDistance from "../locationDistance";
 import RestaurantSearch from "../../../components/restaurantSearch";
 import RestaurantCard from "../../../components/restaurantCard";
 import DietaryNeedsPicker from "../../../components/dietaryNeedsPicker";
@@ -28,7 +31,11 @@ export default function Nominations({ roomId }: { roomId: string }) {
   const memberName = session?.name || "";
   const [state, setState] = useState<RoomState | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const center = useGroupCenter(state?.room);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  // "Find details" on a typed nomination fills the search box with its name
+  const [searchRequest, setSearchRequest] = useState<{ query: string; key: number } | null>(null);
+  const center = useGroupCenter(state?.room, state?.hostLocation);
 
   useEffect(() => {
     void trackScreen("nominations");
@@ -38,7 +45,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
     const stop = subscribeRoomState(roomId, (nextState) => {
       setState(nextState);
       setLoaded(true);
-    });
+    }, (error) => { setError(userErrorMessage(error, "Unable to load nominations. Please try again.")); setLoaded(true); });
 
     return () => stop();
   }, [roomId]);
@@ -61,11 +68,16 @@ export default function Nominations({ roomId }: { roomId: string }) {
   async function saveBudgetRanges(nextRanges: BudgetRange[]) {
     if (!memberId) return;
 
-    await submitPreferences(roomId, memberId, {
-      budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
-      favorites: [],
-    });
-    void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
+    setError("");
+    try {
+      const result = await submitPreferences(roomId, memberId, {
+        budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
+      });
+      setState(result.state);
+      void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
+    } catch (error) {
+      setError(userErrorMessage(error, "Unable to save budget ranges. Please try again."));
+    }
   }
 
   async function toggleBudgetRange(range: BudgetRange) {
@@ -80,54 +92,89 @@ export default function Nominations({ roomId }: { roomId: string }) {
   async function saveDietaryNeeds(nextNeeds: DietaryTag[]) {
     if (!memberId) return;
 
-    await submitPreferences(roomId, memberId, {
-      dietaryNeeds: nextNeeds,
-      budgetRanges: selectedBudgetRanges,
-      favorites: [],
-    });
-    void trackEvent("dietary_needs_updated", { need_count: nextNeeds.length });
-  }
-
-  // typed name, used when Google search is unavailable or can't find the place
-  async function addRestaurant(restaurantName: string) {
-    if (!memberId || !restaurantName.trim()) return;
-
-    await submitPreferences(roomId, memberId, {
-      favorites: [restaurantName.trim()],
-      budgetRanges: selectedBudgetRanges,
-    });
-
-    void trackEvent("restaurant_nominated", { source: "typed" });
+    setError("");
+    try {
+      const result = await submitPreferences(roomId, memberId, { dietaryNeeds: nextNeeds });
+      setState(result.state);
+      void trackEvent("dietary_needs_updated", { need_count: nextNeeds.length });
+    } catch (error) {
+      setError(userErrorMessage(error, "Unable to save dietary needs. Please try again."));
+    }
   }
 
   // picked from Google Places search; looks up Yelp dietary info before saving
   async function addPlace(place: PlaceResult) {
-    if (!memberId) return;
-
     const dietary = await lookupDietary(place);
-    await nominatePlace(roomId, memberId, {
-      ...place,
-      dietaryTags: dietary.tags,
-      dietaryChecked: dietary.checked,
-      yelpUrl: dietary.yelpUrl,
-    });
+    const added = await addRestaurant(place.name, placeToRestaurant(place, dietary));
+    if (added) {
+      void trackEvent("restaurant_nominated", { source: "google_places", dietary_info_found: dietary.checked });
+    }
+  }
 
-    void trackEvent("restaurant_nominated", {
-      source: "google_places",
-      dietary_info_found: dietary.checked,
-    });
+  // typed name, used when search is unavailable or can't find the place
+  async function addTypedName(restaurantName: string) {
+    const added = await addRestaurant(restaurantName);
+    if (added) void trackEvent("restaurant_nominated", { source: "typed" });
+  }
+
+  async function addRestaurant(nameInput: string, restaurant?: Restaurant): Promise<boolean> {
+    const restaurantName = restaurant?.name.trim() || nameInput.trim();
+    if (!memberId || !restaurantName || saving) return false;
+    const current = myPreference?.favorites ?? [];
+    const alreadyNominated = current.some((favorite) => restaurantNameKey(favorite) === restaurantNameKey(restaurantName));
+    if (alreadyNominated && !restaurant) {
+      setError("You've already nominated this restaurant.");
+      return false;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const result = await submitPreferences(roomId, memberId, {
+        favorites: alreadyNominated ? current : [...current, restaurantName],
+        restaurants: restaurant ? [restaurant] : [],
+        budgetRanges: selectedBudgetRanges,
+      });
+      setState(result.state);
+      return true;
+    } catch (error) {
+      console.error(error);
+      setError(userErrorMessage(error, "Couldn't add your nomination. Please try again."));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeRestaurant(restaurantName: string) {
+    if (!memberId || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await removeNomination(roomId, memberId, restaurantName);
+      setState(result.state);
+      void trackEvent("restaurant_nomination_removed");
+    } catch (error) {
+      console.error(error);
+      setError("Couldn't remove the nomination. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function markReady() {
-    if (!memberId || !state || state.options.length === 0) return;
-
-    await submitPreferences(roomId, memberId, {
-      favorites: [],
-      budgetRanges: selectedBudgetRanges,
-    });
-
-    await markMemberReadyForVoting(roomId, memberId, true);
-    void trackEvent("ready_to_vote");
+    if (!memberId || !state || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await markMemberReadyForVoting(roomId, memberId, true);
+      setState(result.state);
+      void trackEvent("ready_to_vote");
+    } catch (error) {
+      console.error(error);
+      setError("Couldn't mark you as ready. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (!loaded) {
@@ -136,7 +183,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
 
   const restaurants = state?.options || [];
   const myDietaryNeeds = myPreference?.dietaryNeeds || [];
-  const dietaryNeeds = groupDietaryNeeds(state?.preferences || []);
+  const dietaryNeeds = state?.groupDietaryNeeds || [];
   const nominatedPlaceIds = restaurants.flatMap((restaurant) => restaurant.placeId ? [restaurant.placeId] : []);
   const waiting = Boolean(myPreference?.readyToVote);
   const readyCount = state?.readyMemberIds.length || 0;
@@ -210,11 +257,14 @@ export default function Nominations({ roomId }: { roomId: string }) {
                 );
               })}
             </div>
+            {state && (
+              <LocationDistance roomId={roomId} state={state} disabled={saving || waiting} />
+            )}
 
             <DietaryNeedsPicker
               selected={myDietaryNeeds}
               onChange={(next) => void saveDietaryNeeds(next)}
-              disabled={!memberId}
+              disabled={!memberId || saving || waiting}
             />
           </div>
 
@@ -229,13 +279,20 @@ export default function Nominations({ roomId }: { roomId: string }) {
               Nominating as {memberName || "Guest"}.{" "}
             </p>
 
-            <RestaurantSearch
-              center={center}
-              disabled={!memberId}
-              nominatedPlaceIds={nominatedPlaceIds}
-              onAddPlace={addPlace}
-              onAddName={addRestaurant}
-            />
+            <div id="restaurant-search">
+              <RestaurantSearch
+                center={center}
+                disabled={!memberId || saving || waiting}
+                nominatedPlaceIds={nominatedPlaceIds}
+                searchRequest={searchRequest}
+                onAddPlace={addPlace}
+                onAddName={addTypedName}
+              />
+            </div>
+
+            {(error || state?.reaskReason) && (
+              <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{error || state?.reaskReason}</p>
+            )}
 
             {!memberId && (
               <p className="mt-3 text-xs text-[#9C5A49]">
@@ -253,7 +310,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
             </p>
             <h2 className="mt-4 font-serif text-4xl"> The contenders. </h2>
             <p className="mt-3 text-sm text-[#68665A]">
-              {restaurants.length} currently match everyone&apos;s range
+              Your {restaurants.length} nominations. Other members&apos; restaurants are revealed when voting starts.
             </p>
 
             {restaurants.length === 0 && (
@@ -268,6 +325,35 @@ export default function Nominations({ roomId }: { roomId: string }) {
                   key={restaurant.id}
                   restaurant={restaurant}
                   dietaryNeeds={dietaryNeeds}
+                  footer={
+                    <div className="mt-5 flex items-center justify-between gap-4 text-xs">
+                      {restaurant.id.startsWith("nomination-") ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSearchRequest({ query: restaurant.name, key: Date.now() });
+                            document.getElementById("restaurant-search")?.scrollIntoView({ behavior: "smooth", block: "center" });
+                          }}
+                          disabled={saving || waiting}
+                          className="text-[#68665A] underline disabled:opacity-40"
+                        >
+                          Find details
+                        </button>
+                      ) : <span />}
+                      {myPreference?.favorites.some(
+                        (favorite) => restaurantNameKey(favorite) === restaurantNameKey(restaurant.name)
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={() => void removeRestaurant(restaurant.name)}
+                          disabled={saving || waiting}
+                          className="flex items-center gap-2 text-[#9C5A49] hover:underline disabled:opacity-40"
+                        >
+                          <span>✕  Remove Nomination</span>
+                        </button>
+                      )}
+                    </div>
+                  }
                 />
               ))}
             </div>
@@ -281,7 +367,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
           </h2>
           <p className="mt-4 text-sm text-[#68665A]">
             {waiting
-              ? "You&apos;re ready! Waiting for everyone else."
+              ? "You are ready! Waiting for everyone else."
               : "Time to let everyone have their say."}
           </p>
           <p className="mt-3 text-xs text-[#777466]">
@@ -289,8 +375,8 @@ export default function Nominations({ roomId }: { roomId: string }) {
           </p>
           {!waiting ? (
             <button
-              onClick={markReady}
-              disabled={restaurants.length === 0 || !memberId}
+              onClick={() => void markReady()}
+              disabled={!memberId || saving}
               className="mt-8 rounded-full bg-[#343329] px-10 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40"
             >
               Ready to Vote →

@@ -1,5 +1,7 @@
 // Shared Google Places types and helpers. Safe to import on the client:
 // the API key only ever lives in the /api/places route handlers.
+import type { BudgetRange, Restaurant } from "../backend/AppBackend";
+import type { DietaryLookup } from "./dietary";
 
 // The point restaurant search and distances are measured from (the group's location).
 export type GroupCenter = {
@@ -55,6 +57,45 @@ export function milesBetween(
     const h = Math.sin(dLat / 2) ** 2
         + Math.cos(toRadians(a.latitude)) * Math.cos(toRadians(b.latitude)) * Math.sin(dLon / 2) ** 2;
     return 2 * earthRadiusMiles * Math.asin(Math.sqrt(h));
+}
+
+const PRICE_LEVEL_BUDGETS: Record<string, BudgetRange> = {
+    PRICE_LEVEL_FREE: "UNDER_10",
+    PRICE_LEVEL_INEXPENSIVE: "UNDER_10",
+    PRICE_LEVEL_MODERATE: "TEN_TO_THIRTY",
+    PRICE_LEVEL_EXPENSIVE: "THIRTY_TO_SIXTY",
+    PRICE_LEVEL_VERY_EXPENSIVE: "SIXTY_PLUS",
+};
+
+// Turns a search result (plus its Yelp lookup) into the Restaurant saved in the room.
+// Optional fields are only set when present, because Firestore rejects undefined values.
+export function placeToRestaurant(place: PlaceResult, dietary: DietaryLookup): Restaurant {
+    const restaurant: Restaurant = {
+        // same id format as /api/restaurants/search, so the same place isn't saved twice
+        id: `google-${place.placeId}`,
+        name: place.name,
+        cuisine: place.cuisine || "Restaurant",
+        // unknown price stays null; the backend only keeps it if everyone allows every budget
+        budgetRange: place.priceLevel ? PRICE_LEVEL_BUDGETS[place.priceLevel] ?? null : null,
+        priceLabel: priceLevelLabel(place.priceLevel) || "Price unavailable",
+        distanceMiles: place.distanceMiles,
+        rating: place.rating ?? 0,
+        reviewCount: place.userRatingCount ?? 0,
+        placeId: place.placeId,
+        dietaryChecked: dietary.checked,
+        dietaryTags: dietary.tags,
+    };
+    if (place.priceLevel) restaurant.priceLevel = place.priceLevel;
+    if (place.latitude !== null && place.longitude !== null) {
+        restaurant.lat = place.latitude;
+        restaurant.lng = place.longitude;
+    }
+    if (place.address) restaurant.address = place.address;
+    if (place.photoName) restaurant.photoName = place.photoName;
+    if (place.mapsUrl) restaurant.mapsUrl = place.mapsUrl;
+    if (place.website) restaurant.website = place.website;
+    if (dietary.yelpUrl) restaurant.yelpUrl = dietary.yelpUrl;
+    return restaurant;
 }
 
 // Photos go through our own route so the API key never reaches the browser.

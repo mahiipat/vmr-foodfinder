@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import {
     submitVotes,
     subscribeRoomState,
+    userErrorMessage,
     type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
@@ -17,35 +18,34 @@ export default function Voting({ roomId }: { roomId: string }) {
     const [state, setState] = useState<RoomState | null>(null);
     const [selected, setSelected] = useState<string[]>([]);
     const [loaded, setLoaded] = useState(false);
-    const hasHydratedVote = useRef(false);
+    const hydratedRound = useRef<number | null>(null);
+    const [error, setError] = useState("");
+    const [saving, setSaving] = useState(false);
 
     useEffect(() => {
         void trackScreen("voting");
     }, []);
 
     useEffect(() => {
-        hasHydratedVote.current = false;
+        hydratedRound.current = null;
 
         const stop = subscribeRoomState(roomId, (nextState) => {
             setState(nextState);
             setLoaded(true);
-
-            if (!nextState || !memberId || hasHydratedVote.current) {
-                return;
-            }
-
-            const previousVote = nextState.votesByMember[memberId] || [];
-            setSelected(previousVote);
-            hasHydratedVote.current = true;
-        });
+            if (nextState?.phase === "nominations") router.replace(`/room/${roomId}/nominations`);
+            if (nextState?.phase === "results") router.replace(`/room/${roomId}/results`);
+            if (!nextState || !memberId || hydratedRound.current === nextState.round) return;
+            setSelected(nextState.votesByMember[memberId] || []);
+            hydratedRound.current = nextState.round;
+        }, (error) => { setError(userErrorMessage(error, "Unable to load voting. Please try again.")); setLoaded(true); });
 
         return () => stop();
-    }, [roomId, memberId]);
+    }, [roomId, memberId, router]);
 
     function toggleRestaurant(id: string) {
         setSelected((previous) => previous.includes(id)
             ? previous.filter((restaurantId) => restaurantId !== id)
-            : [...previous, id]);
+            : state?.phase === "runoff" ? [id] : [...previous, id]);
         void trackEvent("vote_selection_changed", {
             selected_restaurant_id: id,
             action: selected.includes(id) ? "removed" : "added",
@@ -53,10 +53,18 @@ export default function Voting({ roomId }: { roomId: string }) {
     }
 
     async function submitVote() {
-        if (selected.length === 0 || !memberId) return;
-        await submitVotes(roomId, memberId, selected);
-        void trackEvent("votes_submitted", { selected_restaurant_count: selected.length });
-        router.push(`/room/${roomId}/results`);
+        if (selected.length === 0 || !memberId || !state || saving) return;
+        setSaving(true);
+        setError("");
+        try {
+            const result = await submitVotes(roomId, memberId, selected, state.round);
+            setState(result.state);
+            void trackEvent("votes_submitted", { selected_restaurant_count: selected.length });
+            if (result.state.phase !== "runoff" || state.phase === "runoff") router.push(`/room/${roomId}/results`);
+            else { setSelected([]); hydratedRound.current = result.state.round; }
+        } catch (error) {
+            setError(userErrorMessage(error, "Unable to submit vote. Please try again."));
+        } finally { setSaving(false); }
     }
 
     const eligible = state?.options || [];
@@ -71,13 +79,13 @@ export default function Voting({ roomId }: { roomId: string }) {
                 <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/15 px-6 py-6 sm:px-12">
                     <button onClick={() => router.push(`/room/${roomId}/nominations`)} className="text-[10px] uppercase tracking-[0.2em]"> ← Nominations </button>
                     <span className="font-serif text-3xl">foodfinder.</span>
-                    <span className="text-[10px] uppercase tracking-[0.2em]"> Voting </span>
+                    <span className="text-[10px] uppercase tracking-[0.2em]">{state?.phase === "runoff" ? "Runoff" : "Voting"}</span>
                 </nav>
 
                 <section className="relative z-10 px-6 pt-20 text-center">
                     <p className="text-[10px] uppercase tracking-[0.35em] text-[#777466]"> The final say </p>
-                    <h1 className="mt-5 font-serif text-[clamp(4rem,9vw,8rem)] uppercase leading-[0.85] tracking-[-0.05em]"> Cast your vote. </h1>
-                    <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]"> Every opinion matters. Choose all restaurants you would be happy to visit. </p>
+                    <h1 className="mt-5 font-serif text-[clamp(4rem,9vw,8rem)] uppercase leading-[0.85] tracking-[-0.05em]">{state?.phase === "runoff" ? "Runoff vote." : "Cast your vote."}</h1>
+                    <p className="mx-auto mt-8 max-w-md text-sm leading-7 text-[#68665A]">{state?.phase === "runoff" ? "It's a tie! Choose one of the tied restaurants." : "Every opinion matters. Choose all restaurants you would be happy to visit."}</p>
                     <p className="mt-4 text-xs uppercase tracking-[0.2em] text-[#777466]"> Voting as {memberName || "Guest"} </p>
                 </section>
 
@@ -92,7 +100,7 @@ export default function Voting({ roomId }: { roomId: string }) {
                                     <div>
                                         <h2 className="font-serif text-3xl sm:text-4xl">{restaurant.name}</h2>
                                         <p className="mt-2 text-xs text-[#68665A]">{restaurant.cuisine} · {restaurant.priceLabel}</p>
-                                        <p className="mt-2 text-xs text-[#777466]">⭐ {restaurant.rating.toFixed(1)} ({restaurant.reviewCount} ratings)</p>
+                                        <p className="mt-2 text-xs text-[#777466]">{restaurant.reviewCount > 0 ? `⭐ ${restaurant.rating.toFixed(1)} (${restaurant.reviewCount} ratings)` : "No ratings available"}</p>
                                     </div>
                                 </div>
                                 <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#343329] ${selected.includes(restaurant.id) ? "bg-[#343329] text-white" : ""}`}>
@@ -103,8 +111,9 @@ export default function Voting({ roomId }: { roomId: string }) {
                     </div>
 
                     <div className="mt-14 text-center">
-                        <p className="text-sm text-[#68665A]">Select as many restaurants as you like.</p>
-                        <button onClick={submitVote} disabled={selected.length === 0 || !memberId} className="mt-8 rounded-full bg-[#343329] px-12 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
+                        <p className="text-sm text-[#68665A]">{state?.phase === "runoff" ? "Runoff: choose one of the tied restaurants." : "Select as many restaurants as you like."}</p>
+                        {error && <p role="alert" className="mt-4 text-sm text-[#9C5A49]">{error}</p>}
+                        <button onClick={submitVote} disabled={selected.length === 0 || !memberId || saving} className="mt-8 rounded-full bg-[#343329] px-12 py-4 text-[11px] uppercase tracking-[0.2em] text-white hover:bg-[#565344] disabled:opacity-40">
                             Submit My Vote →
                         </button>
                         {!memberId && <p className="mt-4 text-xs text-[#9C5A49]">Join the group room before voting.</p>}

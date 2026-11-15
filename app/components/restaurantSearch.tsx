@@ -10,12 +10,21 @@ type Props = {
     onAddPlace: (place: PlaceResult) => Promise<void>;
     // fallback when Google search isn't available or can't find the place
     onAddName: (name: string) => Promise<void>;
+    // set by the page (e.g. "Find details" on a typed nomination) to fill in the search box
+    searchRequest?: { query: string; key: number } | null;
 };
 
 // Empty box: popular restaurants near the group. Typing: search by name.
 // If search isn't configured it turns into the plain "type a name" input.
-export default function RestaurantSearch({ center, disabled, nominatedPlaceIds, onAddPlace, onAddName }: Props) {
+export default function RestaurantSearch({ center, disabled, nominatedPlaceIds, onAddPlace, onAddName, searchRequest }: Props) {
     const [query, setQuery] = useState("");
+    // adjust state during render when the page asks for a new search (React's recommended
+    // alternative to setting state in an effect)
+    const [handledRequestKey, setHandledRequestKey] = useState<number | null>(null);
+    if (searchRequest && searchRequest.key !== handledRequestKey) {
+        setHandledRequestKey(searchRequest.key);
+        setQuery(searchRequest.query);
+    }
     const [results, setResults] = useState<PlaceResult[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
