@@ -2,24 +2,108 @@
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { createGroup as createGroupRecord } from "../backend/AppBackend";
+import { createGroup as createGroupRecord, logOut, subscribeAccount, userErrorMessage, type Account } from "../backend/AppBackend";
 import { trackEvent, trackScreen } from "../lib/analytics";
 
 export default function Home() {
     const router = useRouter();
     const [groupName, setGroupName] = useState("");
     const [groupLocation, setGroupLocation] = useState("");
+    const [locationLoading, setLocationLoading] = useState(false);
+    const [locationError, setLocationError] = useState("");
+    const [error, setError] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [account, setAccount] = useState<Account | null>();
+
+    useEffect(() => subscribeAccount(setAccount), []);
+
+    async function handleLogOut() {
+        try { await logOut(); }
+        catch (error) { setError(userErrorMessage(error, "Unable to log out. Please try again.")); }
+    }
 
     useEffect(() => {
         void trackScreen("home");
     }, []);
 
+    async function useCurrentLocation() {
+        if (!navigator.geolocation) {
+            setLocationError("Your browser does not support location services.");
+            return;
+        }
+
+        setLocationLoading(true);
+        setLocationError("");
+
+        navigator.geolocation.getCurrentPosition(
+            async (position) => {
+                const { latitude, longitude } = position.coords;
+
+                try {
+                    // Convert device coordinates into a city or ZIP code
+                    const response = await fetch(
+                        `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
+                    );
+
+                    if (!response.ok) {
+                        throw new Error("Unable to retrieve location");
+                    }
+
+                    const data = await response.json();
+
+                    const city =
+                        data.address?.city ||
+                        data.address?.town ||
+                        data.address?.village ||
+                        data.address?.municipality ||
+                        data.address?.county;
+
+                    const state = data.address?.state;
+
+                    if (city) {
+                        setGroupLocation(state ? `${city}, ${state}` : city);
+                    } else if (data.address?.postcode) {
+                        setGroupLocation(data.address.postcode);
+                    } else {
+                        setLocationError(
+                            "Couldn't identify your city. Please enter it manually."
+                        );
+                    }
+                } catch (error) {
+                    console.error(error);
+                    setLocationError(
+                        "Unable to identify your location. Please enter it manually."
+                    );
+                } finally {
+                    setLocationLoading(false);
+                }
+            },
+            () => {
+                setLocationLoading(false);
+                setLocationError(
+                    "Location access denied or unavailable. Please enter your city or ZIP code."
+                );
+            },
+            {
+                enableHighAccuracy: false,
+                timeout: 10000,
+                maximumAge: 60000,
+            }
+        );
+    }
+
     async function createGroup() {
-        if (!groupName.trim() || !groupLocation.trim()) return;
-        void trackEvent("group_creation_started");
-        const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
-        void trackEvent("group_created");
-        router.push(`/room/${roomId}`);
+        if (!groupName.trim() || !groupLocation.trim() || saving) return;
+        setSaving(true);
+        setError("");
+        try {
+            void trackEvent("group_creation_started");
+            const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
+            void trackEvent("group_created");
+            router.push(`/room/${roomId}`);
+        } catch (error) {
+            setError(userErrorMessage(error, "Unable to create group. Please try again."));
+        } finally { setSaving(false); }
     }
 
     return (
@@ -27,10 +111,23 @@ export default function Home() {
             <div className="relative mx-auto min-h-[90vh] max-w-7xl overflow-hidden rounded-sm bg-[#F0EADF] shadow-2xl">
                 <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_10%_95%,rgba(231,153,108,0.65),transparent_45%),radial-gradient(ellipse_at_95%_90%,rgba(143,157,112,0.50),transparent_45%)]"></div>
 
-                <nav className="relative z-10 flex items-center justify-between border-b border-[#343329]/10 px-6 py-6 sm:px-12">
+                <nav className="relative z-10 flex flex-wrap items-center justify-between gap-4 border-b border-[#343329]/10 px-6 py-6 sm:px-12">
                     <a href="#create" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> Create Group </a>
                     <Link href="/" className="font-serif text-3xl tracking-tight"> foodfinder. </Link>
-                    <a href="#about" className="text-[10px] font-semibold uppercase tracking-[0.25em]"> About </a>
+                    <div className="flex items-center gap-4 text-[10px] font-semibold uppercase tracking-[0.15em]">
+                        {account ? (
+                            <>
+                                <span>Hi, {account.name}</span>
+                                <Link href="/profile">My profile</Link>
+                                <button type="button" onClick={handleLogOut} className="rounded-full border border-[#343329] px-4 py-2">Log out</button>
+                            </>
+                        ) : account === null ? (
+                            <>
+                                <Link href="/login">Log in</Link>
+                                <Link href="/signup" className="rounded-full border border-[#343329] px-4 py-2">Sign up</Link>
+                            </>
+                        ) : null}
+                    </div>
                 </nav>
 
                 <section className="relative z-10 flex flex-col items-center px-6 pt-20 text-center sm:pt-24">
@@ -67,28 +164,69 @@ export default function Home() {
                                 className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
                             />
                             <div className="mt-6">
-                                <input
-                                    type="text"
-                                    placeholder="Group location (City or ZIP code)"
-                                    value={groupLocation}
-                                    onChange={(e) => setGroupLocation(e.target.value)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === "Enter") createGroup();
-                                    }}
-                                    className="w-full border-b border-[#343329]/40 bg-transparent px-2 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
-                                    required
-                                />
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        placeholder="Group location (City or ZIP code)"
+                                        value={groupLocation}
+                                        onChange={(e) => {
+                                            setGroupLocation(e.target.value);
+                                            setLocationError("");
+                                        }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter") createGroup();
+                                        }}
+                                        className="w-full border-b border-[#343329]/40 bg-transparent px-10 py-4 text-center text-base outline-none placeholder:text-[#8E8A7D] focus:border-[#343329]"
+                                        required
+                                    />
+
+                                    <button
+                                        type="button"
+                                        onClick={useCurrentLocation}
+                                        disabled={locationLoading}
+                                        title="Use my current location"
+                                        aria-label="Use my current location"
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-[#343329] transition hover:text-[#566B48] disabled:opacity-40"
+                                    >
+                                        {locationLoading ? (
+                                            <span className="block h-4 w-4 animate-spin rounded-full border-2 border-[#566B48] border-t-transparent" />
+                                        ) : (
+                                            <svg
+                                                width="19"
+                                                height="19"
+                                                viewBox="0 0 24 24"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="1.6"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                            >
+                                                <circle cx="12" cy="12" r="3" />
+                                                <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+                                                <circle cx="12" cy="12" r="8" />
+                                            </svg>
+                                        )}
+                                    </button>
+                                </div>
+
+                                {locationError && (
+                                    <p role="alert" className="mt-2 text-xs text-[#9C5A49]">
+                                        {locationError}
+                                    </p>
+                                )}
+
                                 <p className="mt-2 text-xs text-[#777466]">
                                     * Required for matching restaurants near your group.
                                 </p>
                             </div>
                             <button
                                 onClick={createGroup}
-                                disabled={!groupName.trim() || !groupLocation.trim()}
+                                disabled={!groupName.trim() || !groupLocation.trim() || saving}
                                 className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-white transition hover:bg-[#565344] disabled:cursor-not-allowed disabled:opacity-40"
                             >
                                 Create Your Group →
                             </button>
+                            {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
                         </div>
                     </div>
                 </section>

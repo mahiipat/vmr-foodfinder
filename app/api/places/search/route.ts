@@ -44,6 +44,7 @@ export async function POST(request: Request) {
 
     const body = await request.json().catch(() => null);
     const query = typeof body?.query === "string" ? body.query.trim().slice(0, 100) : "";
+    const location = typeof body?.location === "string" ? body.location.trim().slice(0, 200) : "";
     const center = isValidCoordinate(body?.latitude, body?.longitude)
         ? { latitude: body.latitude as number, longitude: body.longitude as number }
         : null;
@@ -54,7 +55,7 @@ export async function POST(request: Request) {
         ? [
             "https://places.googleapis.com/v1/places:searchText",
             {
-                textQuery: query,
+                textQuery: !center && location ? `${query} restaurant in ${location}` : query,
                 includedType: "restaurant",
                 pageSize: MAX_RESULTS,
                 ...(center && { locationBias: { circle: { center, radius: SEARCH_BIAS_RADIUS_METERS } } }),

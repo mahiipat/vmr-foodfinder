@@ -34,8 +34,8 @@ export default function RestaurantCard({ restaurant, size = "small", dietaryNeed
                 <p className={`mt-3 text-[#68665A] ${large ? "text-sm" : "text-xs"}`}>{details.join(" · ")}</p>
                 <p className="mt-2 text-xs text-[#777466]">
                     {restaurant.reviewCount > 0
-                        ? `★ ${restaurant.rating.toFixed(1)} (${restaurant.reviewCount.toLocaleString()} Google reviews)`
-                        : "No Google ratings yet"}
+                        ? `★ ${restaurant.rating.toFixed(1)} (${restaurant.reviewCount.toLocaleString()} ${restaurant.id.startsWith("yelp-") ? "Yelp" : "Google"} reviews)`
+                        : "No ratings available"}
                 </p>
                 {restaurant.address && <p className="mt-2 text-xs text-[#777466]">{restaurant.address}</p>}
 

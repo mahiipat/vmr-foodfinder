@@ -38,14 +38,18 @@ export async function lookupDietary(place: { name: string; latitude: number | nu
             longitude: String(place.longitude),
         });
         const res = await fetch(`/api/yelp/dietary?${params}`);
-        if (!res.ok) return NO_DIETARY_INFO;
+        if (!res.ok) {
+            console.warn("Dietary lookup unavailable", res.status);
+            return NO_DIETARY_INFO;
+        }
         const data = (await res.json()) as Partial<DietaryLookup>;
         return {
             checked: Boolean(data.checked),
-            tags: (data.tags ?? []).filter(isDietaryTag),
+            tags: Array.isArray(data.tags) ? data.tags.filter(isDietaryTag) : [],
             yelpUrl: typeof data.yelpUrl === "string" ? data.yelpUrl : "",
         };
-    } catch {
+    } catch (error) {
+        console.warn("Dietary lookup failed", error);
         return NO_DIETARY_INFO;
     }
 }

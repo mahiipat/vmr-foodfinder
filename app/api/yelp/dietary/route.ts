@@ -25,8 +25,8 @@ export async function GET(request: Request) {
 
     const { searchParams } = new URL(request.url);
     const name = (searchParams.get("name") ?? "").trim().slice(0, 100);
-    const latitude = Number(searchParams.get("latitude"));
-    const longitude = Number(searchParams.get("longitude"));
+    const latitude = Number(searchParams.get("latitude") ?? NaN);
+    const longitude = Number(searchParams.get("longitude") ?? NaN);
     if (!name || !isValidCoordinate(latitude, longitude)) {
         return Response.json({ error: "Name and location are required." }, { status: 400 });
     }
