@@ -1,6 +1,8 @@
 import { createUserWithEmailAndPassword, EmailAuthProvider, linkWithCredential, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut, updateProfile, type User } from "firebase/auth";
 import { addDoc, collection, doc, getDoc, onSnapshot, runTransaction, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
+// type-only so the test fixture (which only allows Firebase imports at runtime) still loads this file
+import type { DietaryTag } from "../lib/dietary";
 
 export type BudgetRange = "UNDER_10" | "TEN_TO_THIRTY" | "THIRTY_TO_SIXTY" | "SIXTY_PLUS";
 export const ALL_BUDGET_RANGES: BudgetRange[] = ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"];
@@ -14,14 +16,20 @@ export type Restaurant = {
   id: string; name: string; cuisine: string; budgetRange: BudgetRange | null;
   priceLevel?: string; priceLabel: string; distanceMiles: number | null;
   rating: number; reviewCount: number; lat?: number; lng?: number; address?: string;
+  // Google Places details (only on restaurants picked from search)
+  placeId?: string; photoName?: string; mapsUrl?: string; website?: string;
+  // Yelp dietary info: dietaryChecked is false when the restaurant wasn't found on Yelp
+  dietaryTags?: DietaryTag[]; dietaryChecked?: boolean; yelpUrl?: string;
 };
 export type PreferenceInput = {
   budgetRanges?: BudgetRange[]; favorites?: string[]; restaurants?: Restaurant[]; readyToVote?: boolean;
-  distanceCapMiles?: number | null; hostLocation?: HostLocation | null;
+  distanceCapMiles?: number | null; hostLocation?: HostLocation | null; dietaryNeeds?: DietaryTag[];
 };
 export type Preference = {
   memberId: string; budgetRanges: BudgetRange[]; favorites: string[];
   readyToVote: boolean; distanceCapMiles: number | null; hostLocation: HostLocation | null;
+  // optional so rooms created before dietary needs existed still load
+  dietaryNeeds?: DietaryTag[];
 };
 export type GroupData = {
   version: 2; groupName: string; location: string; createdAt: number;
@@ -40,6 +48,8 @@ export type RoomState = {
   readyMemberIds: string[]; allMembersReadyToVote: boolean; allMembersVoted: boolean;
   hasTie: boolean; distanceCapMiles: number | null; hostLocation: HostLocation | null;
   distanceFilteringAvailable: boolean;
+  // every dietary need anyone in the group selected (preferences above only include your own)
+  groupDietaryNeeds: DietaryTag[];
   phase: GroupData["phase"]; round: number; tieStrategy: TieStrategy;
   reaskReason: string | null; feedback: GroupData["feedback"];
   satisfactionByMember: Record<string, boolean>;
@@ -71,6 +81,23 @@ export function budgets(value: unknown): BudgetRange[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 4 ||
       value.some((item) => !ALL_BUDGET_RANGES.includes(item))) throw new RoomError("Select valid budget ranges.");
   return [...new Set(value)] as BudgetRange[];
+}
+const DIETARY_TAGS: DietaryTag[] = ["vegetarian", "vegan", "gluten_free", "halal", "kosher"];
+export function dietaryNeeds(value: unknown): DietaryTag[] {
+  if (!Array.isArray(value) || value.some((item) => !DIETARY_TAGS.includes(item))) throw new RoomError("Select valid dietary needs.");
+  return [...new Set(value)] as DietaryTag[];
+}
+export function groupDietaryNeeds(group: GroupData): DietaryTag[] {
+  const needs = new Set(Object.values(group.preferences).flatMap((p) => p.dietaryNeeds ?? []));
+  return DIETARY_TAGS.filter((tag) => needs.has(tag));
+}
+// Item 10 A/B switch: false keeps restaurants whose dietary info is unknown (not on Yelp),
+// true removes them. Restaurants Yelp found but without a needed tag are still kept either way,
+// because Yelp categories are incomplete (a missing tag doesn't mean unsafe).
+export const PRUNE_UNKNOWN_DIETARY = false;
+export function passesDietaryNeeds(restaurant: Restaurant, needs: DietaryTag[], pruneUnknown = PRUNE_UNKNOWN_DIETARY): boolean {
+  if (needs.length === 0 || !pruneUnknown) return true;
+  return restaurant.dietaryChecked === true;
 }
 export function distanceCap(value: unknown): number | null {
   if (value === null) return null;
@@ -127,7 +154,8 @@ export function joinMember(group: GroupData, uid: string, name: string, defaults
   group.members[uid] = { name };
   group.preferences[uid] = { memberId: uid, budgetRanges: defaults.budgetRanges ?? [...ALL_BUDGET_RANGES],
     favorites: defaults.favorites ?? [], readyToVote: false,
-    distanceCapMiles: defaults.distanceCapMiles ?? null, hostLocation: defaults.hostLocation ?? null };
+    distanceCapMiles: defaults.distanceCapMiles ?? null, hostLocation: defaults.hostLocation ?? null,
+    dietaryNeeds: [] };
   resetReady(group);
 }
 export function resetReady(group: GroupData) {
@@ -140,7 +168,8 @@ export function updatePreferences(group: GroupData, uid: string, input: Preferen
   if (input.favorites !== undefined) preference.favorites = names(input.favorites);
   if (input.distanceCapMiles !== undefined) preference.distanceCapMiles = distanceCap(input.distanceCapMiles);
   if (input.hostLocation !== undefined) preference.hostLocation = input.hostLocation;
-  if (input.budgetRanges !== undefined || input.favorites !== undefined || input.distanceCapMiles !== undefined || input.hostLocation !== undefined) {
+  if (input.dietaryNeeds !== undefined) preference.dietaryNeeds = dietaryNeeds(input.dietaryNeeds);
+  if (input.budgetRanges !== undefined || input.favorites !== undefined || input.distanceCapMiles !== undefined || input.hostLocation !== undefined || input.dietaryNeeds !== undefined) {
     resetReady(group);
     group.reaskReason = null;
   }
@@ -153,7 +182,9 @@ export function updatePreferences(group: GroupData, uid: string, input: Preferen
 export function eligibleRestaurants(group: GroupData): Restaurant[] {
   const preferences = Object.values(group.preferences);
   const active = new Set(preferences.flatMap((p) => p.favorites.map(restaurantNameKey)));
+  const needs = groupDietaryNeeds(group);
   return Object.values(group.restaurants).filter((restaurant) => active.has(restaurantNameKey(restaurant.name)) &&
+    passesDietaryNeeds(restaurant, needs) &&
     preferences.every((preference) => restaurant.budgetRange === null
       ? ALL_BUDGET_RANGES.every((range) => preference.budgetRanges.includes(range))
       : preference.budgetRanges.includes(restaurant.budgetRange)));
@@ -236,6 +267,7 @@ export function roomView(group: GroupData, roomId: string, uid: string): RoomSta
     hasTie: group.phase === "runoff" || (options.length > 1 && options[0].votes > 0 && options[0].votes === options[1].votes && !group.winnerId),
     distanceCapMiles: mine?.distanceCapMiles ?? null, hostLocation: mine?.hostLocation ?? null,
     distanceFilteringAvailable: false,
+    groupDietaryNeeds: member ? groupDietaryNeeds(group) : [],
     phase: group.phase, round: group.round, tieStrategy: group.tieStrategy,
     reaskReason: member ? group.reaskReason : null, feedback: mine && group.feedback[uid] ? { [uid]: group.feedback[uid] } : {},
     satisfactionByMember: member && group.phase === "results"

@@ -9,6 +9,7 @@ import {
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
 import { trackEvent, trackScreen } from "../../../../lib/analytics";
+import RestaurantCard from "../../../components/restaurantCard";
 
 export default function Results({ roomId }: { roomId: string }) {
   const router = useRouter();
@@ -33,6 +34,7 @@ export default function Results({ roomId }: { roomId: string }) {
     (id) => (state?.votesByMember[id] || []).length > 0,
   ).length;
   const finalWinner = state?.phase === "results" ? state.winner : null;
+  const dietaryNeeds = state?.groupDietaryNeeds ?? [];
   const satisfaction = state?.satisfactionByMember ?? {};
   const responses = Object.values(satisfaction);
   const happyCount = responses.filter(Boolean).length;
@@ -70,7 +72,7 @@ export default function Results({ roomId }: { roomId: string }) {
           <p className="mx-auto mt-8 max-w-2xl text-sm leading-7 text-[#68665A]">Your group&apos;s preferences, all in one place. Here&apos;s how the votes stack up.</p>
         </section>
 
-        <section className="relative z-10 mx-auto mt-16 max-w-3xl px-8 pb-16 text-center">
+        <section className="relative z-10 mx-auto mt-16 max-w-4xl px-8 pb-16 text-center">
           <div className="border-y border-[#343329]/30 py-14">
             {finalWinner ? (
               <div className="flex flex-col items-center gap-8">
@@ -78,14 +80,17 @@ export default function Results({ roomId }: { roomId: string }) {
                   <p className="text-[10px] uppercase tracking-[0.3em] text-[#566B48]">
                     {state?.round === 1 ? "The runoff winner" : rankings.length > 1 && rankings[0].votes === rankings[1].votes ? "It's a tie — a random winner was chosen!" : "We have a winner!"}
                   </p>
-                  <h2 className="mt-5 font-serif text-5xl sm:text-6xl">{finalWinner.name}</h2>
-                  <p className="mt-5 text-sm text-[#566B48]">{finalWinner.cuisine} · {finalWinner.priceLabel}</p>
-                  <div className="mt-6 flex flex-wrap justify-center gap-x-6 gap-y-2 text-xs text-[#566B48]">
-                    <span>Rating: {finalWinner.reviewCount > 0 ? `${finalWinner.rating.toFixed(1)} / 5 (${finalWinner.reviewCount} reviews)` : "Not available"}</span>
-                    <span>{finalWinner.priceLabel}</span>
-                    {finalWinner.distanceMiles !== null && finalWinner.lat !== undefined && finalWinner.lng !== undefined && (
-                      <span>{finalWinner.distanceMiles.toFixed(1)} mi (estimated)</span>
-                    )}
+                  <div className="mt-6 bg-[#F0EADF]">
+                    <RestaurantCard
+                      restaurant={finalWinner}
+                      size="large"
+                      dietaryNeeds={dietaryNeeds}
+                      footer={
+                        <p className="mt-5 text-xs uppercase tracking-[0.2em] text-[#777466]">
+                          {finalWinner.votes} {finalWinner.votes === 1 ? "vote" : "votes"}
+                        </p>
+                      }
+                    />
                   </div>
                 </div>
                 <div className="w-full max-w-xl border border-[#343329]/25 bg-[#F5F0E7] px-5 py-6 sm:px-8">
@@ -126,15 +131,23 @@ export default function Results({ roomId }: { roomId: string }) {
           </div>
         </section>
 
-        <section className="relative z-10 mx-auto max-w-3xl px-8 pb-24">
+        <section className="relative z-10 mx-auto max-w-4xl px-8 pb-24">
           <div className="flex items-center justify-between"><h3 className="font-serif text-4xl">The full results.</h3><span className="text-xs text-[#777466]">{totalVotes} votes cast</span></div>
           {rankings.length === 0 && <p className="mt-8 text-sm text-[#777466]">No eligible restaurants yet.</p>}
-          <div className="mt-8 space-y-8">
+          <div className="mt-8 grid gap-5 sm:grid-cols-2">
             {rankings.map((restaurant, index) => (
-              <div key={restaurant.id}>
-                <div className="flex items-center justify-between gap-4"><div><p className="font-serif text-2xl">{String(index + 1).padStart(2, "0")} / {restaurant.name}</p><p className="mt-2 text-xs text-[#777466]">{restaurant.priceLabel} · {restaurant.cuisine}</p></div><span className="text-sm">{restaurant.votes} {restaurant.votes === 1 ? "vote" : "votes"}</span></div>
-                <div className="mt-3 h-2 w-full bg-[#343329]/10"><div className="h-full bg-[#747A60] transition-all" style={{ width: `${totalVotes ? (restaurant.votes / totalVotes) * 100 : 0}%` }} /></div>
-              </div>
+              <RestaurantCard
+                key={restaurant.id}
+                restaurant={restaurant}
+                rank={index + 1}
+                dietaryNeeds={dietaryNeeds}
+                footer={
+                  <div className="mt-5">
+                    <p className="text-right text-sm">{restaurant.votes} {restaurant.votes === 1 ? "vote" : "votes"}</p>
+                    <div className="mt-2 h-2 w-full bg-[#343329]/10"><div className="h-full bg-[#747A60] transition-all" style={{ width: `${totalVotes ? (restaurant.votes / totalVotes) * 100 : 0}%` }} /></div>
+                  </div>
+                }
+              />
             ))}
           </div>
           {state?.round === 1 && rankings.length > 0 && (
