@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { updateMemberDistance, userErrorMessage, type RoomState, type HostLocation } from "../../../backend/AppBackend";
 import { getMemberSession } from "../../../lib/foodfinder";
+import { reverseGeocode } from "../../../lib/reverseGeocode";
 
 export default function LocationDistance({ roomId, state, disabled = false }: {
   roomId: string;
@@ -18,13 +19,13 @@ export default function LocationDistance({ roomId, state, disabled = false }: {
   const [addressDraft, setAddressDraft] = useState<string | null>(null);
   const [capDraft, setCapDraft] = useState<string | null>(null);
 
-  async function save(nextCap: number | null, nextLocation: HostLocation | null) {
+  async function save(nextCap: number | null, nextLocation: HostLocation | null, savedMessage = "Your distance preferences are saved.") {
     if (!memberId) return;
     setBusy(true);
     setStatus("");
     try {
       await updateMemberDistance(roomId, memberId, { distanceCapMiles: nextCap, location: nextLocation });
-      setStatus("Your distance preferences are saved.");
+      setStatus(savedMessage);
     } catch (error) {
       setStatus(userErrorMessage(error, "Unable to save preferences."));
     } finally {
@@ -36,17 +37,38 @@ export default function LocationDistance({ roomId, state, disabled = false }: {
     if (!navigator.geolocation) { setStatus("Location unavailable. Enter an address instead."); return; }
     setStatus("Requesting location...");
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        void save(cap ?? 5, {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          address: "Current location",
-        });
+      async (position) => {
+        const { latitude, longitude } = position.coords;
+        setBusy(true);
+        setStatus("Finding your address...");
+        // fill the starting-location field with the real address instead of leaving it blank
+        const address = await reverseGeocode(latitude, longitude);
         setAddressDraft(null);
+        await save(cap ?? 5, { lat: latitude, lng: longitude, address: address ?? "Current location" },
+          address ? "Your distance preferences are saved." : "Saved your location, but couldn't find a street address for it.");
       },
       () => setStatus("Location denied or unavailable. Enter an address below."),
       { enableHighAccuracy: false, timeout: 10000 },
     );
+  }
+
+  // typed starting location: look up its coordinates so distances can be calculated from it
+  async function saveTypedLocation(address: string) {
+    setBusy(true);
+    setStatus("Finding that address...");
+    let coordinates: { lat: number; lng: number } | null = null;
+    try {
+      const response = await fetch(`/api/places/geocode?${new URLSearchParams({ query: address })}`);
+      if (response.ok) {
+        const { center } = await response.json() as { center?: { latitude: number; longitude: number } };
+        if (center) coordinates = { lat: center.latitude, lng: center.longitude };
+      }
+    } catch {
+      // lookup failed; the address is still saved below, just without coordinates
+    }
+    setAddressDraft(null);
+    await save(cap, coordinates ? { ...coordinates, address } : { address },
+      coordinates ? "Your distance preferences are saved." : "Saved, but we couldn't find that address on the map, so distances may be unavailable.");
   }
 
   return (
@@ -66,7 +88,7 @@ export default function LocationDistance({ roomId, state, disabled = false }: {
         <label className="block text-sm">Or enter a starting location
           <input value={addressDraft ?? (location?.address === "Current location" ? "" : location?.address ?? "")} disabled={busy || disabled} onChange={(event) => setAddressDraft(event.target.value)} placeholder="Address, city or ZIP code" className="mt-2 w-full border-b border-[#343329]/40 bg-transparent p-3 outline-none" />
         </label>
-        <button type="button" disabled={busy || disabled || !addressDraft?.trim()} onClick={() => { void save(cap, { address: addressDraft!.trim() }); setAddressDraft(null); }} className="rounded-full border border-[#343329] px-5 py-2 text-xs disabled:opacity-40">Save starting location</button>
+        <button type="button" disabled={busy || disabled || !addressDraft?.trim()} onClick={() => void saveTypedLocation(addressDraft!.trim())} className="rounded-full border border-[#343329] px-5 py-2 text-xs disabled:opacity-40">Save starting location</button>
         <label className="block text-sm">Maximum distance (miles)
           <input type="number" min="0.1" step="0.5" value={capDraft ?? String(cap ?? 5)} disabled={busy || disabled} onChange={(event) => setCapDraft(event.target.value)} onBlur={() => {
             if (capDraft !== null) {
@@ -77,7 +99,7 @@ export default function LocationDistance({ roomId, state, disabled = false }: {
             }
           }} className="mt-2 w-full border-b border-[#343329]/40 bg-transparent p-3 outline-none" />
         </label>
-        <p className="text-xs leading-5 text-[#68665A]">Device location is required for accurate distance checks. Manually entered addresses need geocoding. Restaurants without coordinates cannot be distance-verified yet.</p>
+        <p className="text-xs leading-5 text-[#68665A]">Use your current location or type an address; typed addresses are looked up on the map automatically. Restaurants without coordinates cannot be distance-verified yet.</p>
       </div>}
       {status && <p role="status" className="mt-4 text-xs text-[#566B48]">{status}</p>}
     </section>

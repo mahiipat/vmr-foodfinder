@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createGroup as createGroupRecord, logOut, subscribeAccount, userErrorMessage, type Account } from "../backend/AppBackend";
 import { trackEvent, trackScreen } from "../lib/analytics";
+import { reverseGeocode } from "../lib/reverseGeocode";
 
 export default function Home() {
     const router = useRouter();
@@ -39,49 +40,21 @@ export default function Home() {
             async (position) => {
                 const { latitude, longitude } = position.coords;
 
-                try {
-                    // Convert device coordinates into a city or ZIP code
-                    const response = await fetch(
-                        `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
-                    );
-
-                    if (!response.ok) {
-                        throw new Error("Unable to retrieve location");
-                    }
-
-                    const data = await response.json();
-
-                    const city =
-                        data.address?.city ||
-                        data.address?.town ||
-                        data.address?.village ||
-                        data.address?.municipality ||
-                        data.address?.county;
-
-                    const state = data.address?.state;
-
-                    if (city) {
-                        setGroupLocation(state ? `${city}, ${state}` : city);
-                    } else if (data.address?.postcode) {
-                        setGroupLocation(data.address.postcode);
-                    } else {
-                        setLocationError(
-                            "Couldn't identify your city. Please enter it manually."
-                        );
-                    }
-                } catch (error) {
-                    console.error(error);
+                // Convert device coordinates into the exact street address
+                const address = await reverseGeocode(latitude, longitude);
+                if (address) {
+                    setGroupLocation(address);
+                } else {
                     setLocationError(
-                        "Unable to identify your location. Please enter it manually."
+                        "Couldn't find an address for your location. Please enter it manually."
                     );
-                } finally {
-                    setLocationLoading(false);
                 }
+                setLocationLoading(false);
             },
             () => {
                 setLocationLoading(false);
                 setLocationError(
-                    "Location access denied or unavailable. Please enter your city or ZIP code."
+                    "Location access denied or unavailable. Please enter the address."
                 );
             },
             {
@@ -167,7 +140,7 @@ export default function Home() {
                                 <div className="relative">
                                     <input
                                         type="text"
-                                        placeholder="Group location (City or ZIP code)"
+                                        placeholder="Group location (exact address or place)"
                                         value={groupLocation}
                                         onChange={(e) => {
                                             setGroupLocation(e.target.value);
