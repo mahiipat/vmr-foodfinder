@@ -14,6 +14,7 @@ test("default profile includes every budget and independent empty collections", 
     budgetRanges: ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"],
     distanceCapMiles: null,
     hostLocation: null,
+    dietaryNeeds: [],
   });
   const profile = defaultProfile("Sam");
   assert.equal(profile.displayName, "Sam");
@@ -42,17 +43,27 @@ test("profile validation trims text, deduplicates favorites, and accepts boundar
   assert.equal(validateProfile({ ...defaultProfile(), distanceCapMiles: 0.1 }).distanceCapMiles, 0.1);
 });
 
-test("profile validation rejects missing, malformed, and unknown fields including uid", () => {
+test("profile validation rejects missing required, malformed, and unknown fields including uid", () => {
   for (const input of [null, [], {}, "profile", { ...defaultProfile(), uid: "another-user" },
     { ...defaultProfile(), extra: true }, { ...defaultProfile(), displayName: 7 },
     { ...defaultProfile(), favorites: "Thai" }, { ...defaultProfile(), budgetRanges: null },
     { ...defaultProfile(), distanceCapMiles: undefined }, { ...defaultProfile(), hostLocation: undefined }]) {
     assert.throws(() => validateProfile(input), isBadRequest);
   }
-  for (const field of Object.keys(defaultProfile())) {
+  for (const field of Object.keys(defaultProfile()).filter((field) => field !== "dietaryNeeds")) {
     const profile: Record<string, unknown> = { ...defaultProfile() };
     delete profile[field];
     assert.throws(() => validateProfile(profile), isBadRequest, field);
+  }
+});
+
+test("profile dietary needs support legacy profiles and validate saved selections", () => {
+  const legacy: Record<string, unknown> = { ...defaultProfile() };
+  delete legacy.dietaryNeeds;
+  assert.deepEqual(validateProfile(legacy).dietaryNeeds, []);
+  assert.deepEqual(validateProfile({ ...defaultProfile(), dietaryNeeds: ["vegan", "halal", "vegan"] }).dietaryNeeds, ["vegan", "halal"]);
+  for (const dietaryNeeds of ["vegan", ["unsupported"], [1]]) {
+    assert.throws(() => validateProfile({ ...defaultProfile(), dietaryNeeds }), isBadRequest);
   }
 });
 

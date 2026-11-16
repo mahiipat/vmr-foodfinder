@@ -13,6 +13,8 @@ CLAUDE.md
 
 # testing
 /coverage
+/study-report*.json
+/study-report*.csv
 
 # next.js
 /.next/

@@ -25,6 +25,7 @@ export function backendFixture(anonymous = true) {
   }
   function set(path: string, value: unknown) { store.set(path, structuredClone(value)); notify(path); }
   const firestore = {
+    Timestamp: { fromMillis: (milliseconds: number) => ({ seconds: Math.floor(milliseconds / 1000), nanoseconds: (milliseconds % 1000) * 1000000 }) },
     doc: (_db: unknown, ...segments: string[]) => segments.join("/"),
     collection: (_db: unknown, path: string) => path,
     getDoc: async (path: string) => snapshot(path),
@@ -77,7 +78,12 @@ export function backendFixture(anonymous = true) {
     if (id === "firebase/auth") return firebaseAuth;
     if (id === "firebase/firestore") return firestore;
     if (id === "./firebase") return { auth, db: {},
-      ANALYTICS_STUDY_STARTED_AT: Date.parse("2026-11-16T01:53:20.605Z"),
+      STUDY_RUN_ID: "test_run", STUDY_ENVIRONMENT: "test", APP_VERSION: "0.1.0",
+      runAccountAction: async (action: () => Promise<unknown>) => action(),
+      ensureUser: async () => {
+        await auth.authStateReady();
+        return auth.currentUser ?? (await firebaseAuth.signInAnonymously()).user;
+      },
       trackEvent: async (name: string, parameters: Record<string, string | number | boolean>) => { analyticsEvents.push({ name, parameters }); },
     };
     throw new Error(`Unexpected import: ${id}`);

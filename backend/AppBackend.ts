@@ -1,6 +1,6 @@
-import { createUserWithEmailAndPassword, EmailAuthProvider, linkWithCredential, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut, updateProfile, type User } from "firebase/auth";
-import { addDoc, collection, doc, getDoc, onSnapshot, runTransaction, setDoc } from "firebase/firestore";
-import { ANALYTICS_STUDY_STARTED_AT, auth, db, trackEvent } from "./firebase";
+import { createUserWithEmailAndPassword, EmailAuthProvider, linkWithCredential, onAuthStateChanged, signInWithEmailAndPassword, signOut, updateProfile, type User } from "firebase/auth";
+import { addDoc, collection, doc, getDoc, onSnapshot, runTransaction, setDoc, Timestamp } from "firebase/firestore";
+import { APP_VERSION, STUDY_ENVIRONMENT, STUDY_RUN_ID, auth, db, ensureUser, runAccountAction, trackEvent } from "./firebase";
 // type-only so the test fixture (which only allows Firebase imports at runtime) still loads this file
 import type { DietaryTag } from "../lib/dietary";
 
@@ -39,6 +39,13 @@ export type GroupData = {
   candidateIds: string[]; votes: Record<string, string[]>; initialVotes: Record<string, string[]>;
   winnerId: string | null; reaskReason: string | null;
   feedback: Record<string, { happy: boolean; restaurantId: string; updatedAt: number }>;
+  study?: {
+    runId: string; environment: string; appVersion: string; assignmentSource: "randomized" | "explicit";
+    shortlistEvaluations: number; emptyShortlists: number; allChoicesPruned: number; initialTies: number; runoffTies: number;
+    votingStartedAt: Timestamp | null; runoffStartedAt: Timestamp | null; decidedAt: Timestamp | null;
+    decisionSeconds: number | null; resolutionMethod: "none" | "runoff" | "random" | null;
+    happyCount: number; responseCount: number;
+  };
 };
 export type RoomState = {
   room: Record<string, unknown>; members: Array<{ id: string; name: string }>;
@@ -59,7 +66,7 @@ type RoomEvent = { name: string; parameters?: Record<string, string | number | b
 function reportRoomEvents(group: GroupData, roomId: string, events: RoomEvent[]) {
   const context = {
     group_id: roomId, experiment_id: "tie_strategy_v1", tie_strategy: group.tieStrategy,
-    group_cohort: group.createdAt >= ANALYTICS_STUDY_STARTED_AT ? "study_20261116" : "legacy",
+    group_cohort: group.study?.runId ?? "legacy",
     phase: group.phase, round: group.round, member_count: Object.keys(group.members).length,
     nomination_count: Object.keys(group.restaurants).length, candidate_count: group.candidateIds.length,
     elapsed_seconds: Math.max(0, (Date.now() - group.createdAt) / 1000),
@@ -155,7 +162,12 @@ export function milesBetween(lat1: number, lng1: number, lat2: number, lng2: num
 export function newGroup(groupName: string, location: string, tieStrategy: TieStrategy): GroupData {
   return { version: 2, groupName, location, createdAt: Date.now(), tieStrategy, phase: "nominations", round: 0,
     members: {}, preferences: {}, restaurants: {}, candidateIds: [], votes: {}, initialVotes: {},
-    winnerId: null, reaskReason: null, feedback: {} };
+    winnerId: null, reaskReason: null, feedback: {}, study: {
+      runId: STUDY_RUN_ID, environment: STUDY_ENVIRONMENT, appVersion: APP_VERSION,
+      assignmentSource: "explicit", shortlistEvaluations: 0, emptyShortlists: 0, allChoicesPruned: 0,
+      initialTies: 0, runoffTies: 0, votingStartedAt: null, runoffStartedAt: null, decidedAt: null,
+      decisionSeconds: null, resolutionMethod: null, happyCount: 0, responseCount: 0,
+    } };
 }
 export function requireMember(group: GroupData, uid: string): Preference {
   if (!Object.hasOwn(group.members, uid)) throw new RoomError("Join this group first.", 403);
@@ -455,41 +467,37 @@ export async function signUp(email: string, password: string, name: string) {
   if (!displayName || displayName.length > 100) {
     throw new Error("Name must contain between 1 and 100 characters.");
   }
-  await auth.authStateReady();
-  const user = auth.currentUser;
-  const credential = user?.isAnonymous
-    ? await linkWithCredential(user, EmailAuthProvider.credential(email.trim(), password))
-    : await createUserWithEmailAndPassword(auth, email.trim(), password);
-  await updateProfile(credential.user, { displayName });
-  await credential.user.getIdToken(true);
-  await saveProfile({
-    displayName,
-    favorites: [],
-    budgetRanges: ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"],
-    distanceCapMiles: null,
-    hostLocation: null,
-    dietaryNeeds: [],
+  return runAccountAction(async () => {
+    await auth.authStateReady();
+    const user = auth.currentUser;
+    const credential = user?.isAnonymous
+      ? await linkWithCredential(user, EmailAuthProvider.credential(email.trim(), password))
+      : await createUserWithEmailAndPassword(auth, email.trim(), password);
+    await updateProfile(credential.user, { displayName });
+    await credential.user.getIdToken(true);
+    await saveProfile({
+      displayName,
+      favorites: [],
+      budgetRanges: ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"],
+      distanceCapMiles: null,
+      hostLocation: null,
+      dietaryNeeds: [],
+    });
+    return credential;
   });
-  return credential;
 }
 
 export function logIn(email: string, password: string) {
-  return signInWithEmailAndPassword(auth, email.trim(), password);
+  return runAccountAction(() => signInWithEmailAndPassword(auth, email.trim(), password));
 }
 
 export function logOut() {
-  return signOut(auth);
+  return runAccountAction(() => signOut(auth));
 }
 
-let pendingGuest: Promise<User> | null = null;
 async function currentUser(): Promise<User> {
-  await auth.authStateReady();
-  if (auth.currentUser) return auth.currentUser;
-  pendingGuest ??= signInAnonymously(auth)
-    .then((credential) => credential.user)
-    .catch((error) => { throw new Error(authErrorMessage(error, "guest")); })
-    .finally(() => { pendingGuest = null; });
-  return pendingGuest;
+  try { return await ensureUser(); }
+  catch (error) { throw new Error(authErrorMessage(error, "guest")); }
 }
 
 function roomRef(roomId: string) {
@@ -534,6 +542,7 @@ function changePreferences(group: GroupData, uid: string, input: PreferenceInput
   if (!sameSelection(previous.budgetRanges, next.budgetRanges)) {
     events.push({ name: "budget_ranges_updated", parameters: { selected_range_count: next.budgetRanges.length } });
   }
+
   if (!sameSelection(previous.dietaryNeeds ?? [], next.dietaryNeeds ?? [])) {
     events.push({ name: "dietary_needs_updated", parameters: { need_count: next.dietaryNeeds?.length ?? 0 } });
   }
@@ -559,11 +568,39 @@ function changePreferences(group: GroupData, uid: string, input: PreferenceInput
   return events;
 }
 
+function updateStudyMetrics(group: GroupData, events: RoomEvent[]) {
+  if (!group.study) return;
+  for (const event of events) {
+    if (event.name === "shortlist_evaluated") group.study.shortlistEvaluations++;
+    if (event.name === "shortlist_empty") group.study.emptyShortlists++;
+    if (event.name === "all_choices_pruned") group.study.allChoicesPruned++;
+    if (event.name === "tie_detected") {
+      if (event.parameters?.round === 0) group.study.initialTies++;
+      else group.study.runoffTies++;
+    }
+    if (event.name === "voting_started") group.study.votingStartedAt = Timestamp.fromMillis(Date.now());
+    if (event.name === "runoff_started") group.study.runoffStartedAt = Timestamp.fromMillis(Date.now());
+    if (event.name === "decision_completed") {
+      group.study.decidedAt = Timestamp.fromMillis(Date.now());
+      const seconds = event.parameters?.decision_seconds;
+      if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) throw new RoomError("Invalid study decision time.");
+      group.study.decisionSeconds = seconds;
+      const resolution = event.parameters?.resolution_method;
+      if (resolution !== "none" && resolution !== "runoff" && resolution !== "random") throw new RoomError("Invalid study resolution.");
+      group.study.resolutionMethod = resolution;
+    }
+  }
+  const feedback = Object.entries(group.feedback).filter(([uid, response]) => Object.hasOwn(group.members, uid) && response.restaurantId === group.winnerId);
+  group.study.responseCount = feedback.length;
+  group.study.happyCount = feedback.filter(([, response]) => response.happy).length;
+}
+
 export async function createGroup(input: { groupName?: string; location?: string; tieStrategy?: TieStrategy } = {}) {
   await currentUser();
   const strategy = input.tieStrategy ?? (Math.random() < 0.5 ? "random" : "runoff");
   if (strategy !== "random" && strategy !== "runoff") throw new RoomError("Invalid tie strategy.");
   const group = newGroup(text(input.groupName ?? "Untitled Group", "group name", 100), text(input.location ?? "Unknown", "group location", 500), strategy);
+  group.study!.assignmentSource = input.tieStrategy ? "explicit" : "randomized";
   const ref = await addDoc(collection(db, "rooms"), group);
   reportRoomEvents(group, ref.id, [
     { name: "group_created" },
@@ -609,6 +646,7 @@ async function changeRoom(roomId: string, memberId: string | undefined, change: 
     const group = groupData(snapshot.data());
     requireMember(group, user.uid);
     const events = change(group, user.uid);
+    updateStudyMetrics(group, events);
     transaction.set(ref, group);
     return { memberId: user.uid, state: roomView(group, roomId, user.uid), group, events };
   });

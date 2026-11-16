@@ -1,14 +1,49 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // study_events/{autoId}: immutable client telemetry, server recordedAt timestamp,
+    // schemaVersion=1, studyRunId (1-80 safe characters), environment, appVersion,
+    // actorUid (authenticated author), clientTimeMs, bounded context and parameters maps.
+    // rooms/{roomId}.study: optional bounded study counters, client-derived timestamps,
+    // immutable runId/assignmentSource, final resolution and satisfaction totals.
+    // Reports use IAM-authorized exports or a trusted studyAnalyst custom claim.
     // Class prototype: rooms contain the shared group state, including nominations.
     // Nomination visibility is filtered in the UI, not enforced per field by these rules.
     // profiles/{uid} contains account preferences and is accessible only to its owner.
     function signedIn() { return request.auth != null; }
+    function runId(value) { return value is string && value.matches('^[A-Za-z0-9_-]{1,80}$'); }
+    function optionalText(data, key, max) {
+      return !(key in data) || (data[key] is string && data[key].size() <= max);
+    }
+    function optionalNumber(data, key) {
+      return !(key in data) || (data[key] is number && data[key] >= 0 && data[key] <= 1000000000000);
+    }
+    function boundedNumber(value, max) { return value is number && value >= 0 && value <= max; }
+    function boundedText(value, max) { return value is string && value.size() <= max; }
+    function validStudy(data) {
+      return data is map && data.keys().hasOnly(['runId', 'environment', 'appVersion', 'assignmentSource', 'shortlistEvaluations', 'emptyShortlists',
+          'allChoicesPruned', 'initialTies', 'runoffTies', 'votingStartedAt', 'runoffStartedAt', 'decidedAt',
+          'decisionSeconds', 'resolutionMethod', 'happyCount', 'responseCount']) &&
+        runId(data.runId) && data.assignmentSource in ['randomized', 'explicit'] &&
+        data.environment in ['production', 'development', 'test', 'emulator'] &&
+        data.appVersion is string && data.appVersion.size() > 0 && data.appVersion.size() <= 80 &&
+        data.shortlistEvaluations is int && data.shortlistEvaluations >= 0 && data.shortlistEvaluations <= 1000000 &&
+        data.emptyShortlists is int && data.emptyShortlists >= 0 && data.emptyShortlists <= data.shortlistEvaluations &&
+        data.allChoicesPruned is int && data.allChoicesPruned >= 0 && data.allChoicesPruned <= data.shortlistEvaluations &&
+        data.initialTies is int && data.initialTies >= 0 && data.initialTies <= 1 &&
+        data.runoffTies is int && data.runoffTies >= 0 && data.runoffTies <= 1 &&
+        (data.votingStartedAt == null || data.votingStartedAt is timestamp) &&
+        (data.runoffStartedAt == null || data.runoffStartedAt is timestamp) &&
+        (data.decidedAt == null || data.decidedAt is timestamp) &&
+        (data.decisionSeconds == null || (data.decisionSeconds is number && data.decisionSeconds >= 0 && data.decisionSeconds <= 1000000000000)) &&
+        data.resolutionMethod in [null, 'none', 'runoff', 'random'] &&
+        data.responseCount is int && data.responseCount >= 0 && data.responseCount <= 30 &&
+        data.happyCount is int && data.happyCount >= 0 && data.happyCount <= data.responseCount;
+    }
     function validRoom(data) {
       return data.keys().hasOnly(['version', 'groupName', 'location', 'createdAt', 'tieStrategy',
           'phase', 'round', 'members', 'preferences', 'restaurants', 'candidateIds', 'votes',
-          'initialVotes', 'winnerId', 'reaskReason', 'feedback']) &&
+          'initialVotes', 'winnerId', 'reaskReason', 'feedback', 'study']) &&
         data.version == 2 && data.groupName is string && data.groupName.size() <= 100 &&
         data.location is string && data.location.size() <= 500 && data.createdAt is number &&
         data.tieStrategy in ['random', 'runoff'] &&
@@ -21,7 +56,8 @@ service cloud.firestore {
         data.initialVotes is map && data.initialVotes.size() <= 30 &&
         data.feedback is map && data.feedback.size() <= 30 &&
         (data.winnerId == null || data.winnerId is string) &&
-        (data.reaskReason == null || data.reaskReason is string);
+        (data.reaskReason == null || data.reaskReason is string) &&
+        (!('study' in data) || validStudy(data.study));
     }
     function validProfile(data) {
       return data.keys().hasOnly(['displayName', 'favorites', 'budgetRanges', 'distanceCapMiles', 'hostLocation']) &&
@@ -32,17 +68,105 @@ service cloud.firestore {
         (data.distanceCapMiles == null || (data.distanceCapMiles is number && data.distanceCapMiles > 0 && data.distanceCapMiles <= 500)) &&
         (data.hostLocation == null || (data.hostLocation is map && data.hostLocation.keys().hasOnly(['lat', 'lng', 'address'])));
     }
+    function validContext(data) {
+      return data is map && data.keys().hasAll(['visitorId', 'sessionId', 'groupId', 'page', 'referrerHost',
+          'utmSource', 'utmMedium', 'utmCampaign', 'userAgent', 'platform', 'language', 'timezone',
+          'deviceCategory', 'screenWidth', 'screenHeight', 'viewportWidth', 'viewportHeight']) &&
+        data.keys().hasOnly(['visitorId', 'sessionId', 'groupId', 'page', 'referrerHost',
+          'utmSource', 'utmMedium', 'utmCampaign', 'userAgent', 'platform', 'language', 'timezone',
+          'deviceCategory', 'screenWidth', 'screenHeight', 'viewportWidth', 'viewportHeight']) &&
+        data.visitorId is string && data.visitorId.size() > 0 && data.visitorId.size() <= 80 &&
+        data.sessionId is string && data.sessionId.size() > 0 && data.sessionId.size() <= 80 &&
+        data.groupId is string && data.groupId.size() <= 128 &&
+        data.page is string && data.page.size() <= 200 &&
+        data.referrerHost is string && data.referrerHost.size() <= 253 &&
+        data.utmSource is string && data.utmSource.size() <= 100 &&
+        data.utmMedium is string && data.utmMedium.size() <= 100 &&
+        data.utmCampaign is string && data.utmCampaign.size() <= 100 &&
+        data.userAgent is string && data.userAgent.size() <= 1024 &&
+        data.platform is string && data.platform.size() <= 100 &&
+        data.language is string && data.language.size() <= 35 &&
+        data.timezone is string && data.timezone.size() <= 100 &&
+        data.deviceCategory in ['mobile', 'tablet', 'desktop'] &&
+        data.screenWidth is number && data.screenWidth >= 0 && data.screenWidth <= 100000 &&
+        data.screenHeight is number && data.screenHeight >= 0 && data.screenHeight <= 100000 &&
+        data.viewportWidth is number && data.viewportWidth >= 0 && data.viewportWidth <= 100000 &&
+        data.viewportHeight is number && data.viewportHeight >= 0 && data.viewportHeight <= 100000;
+    }
+    function validRoomParameters(name, p) {
+      let common = ['group_id', 'experiment_id', 'tie_strategy', 'group_cohort', 'phase', 'round',
+        'member_count', 'nomination_count', 'candidate_count', 'elapsed_seconds', 'dietary_policy'];
+      let extra = p.keys().toSet().difference(common.toSet());
+      return boundedText(p.group_id, 128) && p.experiment_id == 'tie_strategy_v1' &&
+        p.tie_strategy in ['random', 'runoff'] && runId(p.group_cohort) &&
+        p.phase in ['nominations', 'voting', 'runoff', 'results'] && p.round in [0, 1] &&
+        boundedNumber(p.member_count, 30) && boundedNumber(p.nomination_count, 900) &&
+        boundedNumber(p.candidate_count, 900) && boundedNumber(p.elapsed_seconds, 1000000000000) &&
+        p.dietary_policy in ['keep_unknown', 'prune_unknown'] && (
+          (name in ['group_created', 'ready_to_vote', 'readiness_withdrawn'] && extra.size() == 0) ||
+          (name == 'experiment_assigned' && extra.hasOnly(['assignment_source']) && p.assignment_source in ['randomized', 'explicit']) ||
+          (name == 'group_joined' && extra.hasOnly(['returning_member', 'account_type']) && p.returning_member is bool && p.account_type in ['guest', 'registered']) ||
+          (name == 'shortlist_evaluated' && extra.hasOnly(['eligible_count', 'pruned_count', 'all_pruned']) && boundedNumber(p.eligible_count, 900) && boundedNumber(p.pruned_count, 900) && p.all_pruned is bool) ||
+          (name in ['all_choices_pruned', 'shortlist_empty'] && extra.hasOnly(['reset_member_count']) && boundedNumber(p.reset_member_count, 30)) ||
+          (name == 'voting_started' && extra.hasOnly(['eligible_count']) && boundedNumber(p.eligible_count, 900)) ||
+          (name == 'votes_submitted' && extra.hasOnly(['selected_restaurant_count', 'replaced_ballot']) && boundedNumber(p.selected_restaurant_count, 900) && p.replaced_ballot is bool) ||
+          (name in ['voting_round_completed', 'tie_detected'] && extra.hasOnly(['had_tie', 'tied_count']) && p.had_tie is bool && boundedNumber(p.tied_count, 900)) ||
+          (name == 'runoff_started' && extra.hasOnly(['tied_count']) && boundedNumber(p.tied_count, 900)) ||
+          (name == 'tie_resolved' && extra.hasOnly(['resolution_method', 'had_tie', 'random_fallback']) && p.resolution_method in ['none', 'runoff', 'random'] && p.had_tie is bool && p.random_fallback is bool) ||
+          (name == 'decision_completed' && extra.hasOnly(['resolution_method', 'had_tie', 'random_fallback', 'decision_seconds', 'winner_vote_count']) && p.resolution_method in ['none', 'runoff', 'random'] && p.had_tie is bool && p.random_fallback is bool && boundedNumber(p.decision_seconds, 1000000000000) && boundedNumber(p.winner_vote_count, 30)) ||
+          (name == 'budget_ranges_updated' && extra.hasOnly(['selected_range_count']) && boundedNumber(p.selected_range_count, 4)) ||
+          (name == 'dietary_needs_updated' && extra.hasOnly(['need_count']) && boundedNumber(p.need_count, 5)) ||
+          (name == 'restaurant_nominated' && extra.hasOnly(['added_count', 'source', 'dietary_info_found']) && boundedNumber(p.added_count, 30) && p.source in ['typed', 'provider', 'google_places'] && p.dietary_info_found is bool) ||
+          (name == 'restaurant_nomination_removed' && extra.hasOnly(['removed_count']) && boundedNumber(p.removed_count, 30)) ||
+          (name == 'restaurant_details_updated' && extra.hasOnly(['updated_count']) && boundedNumber(p.updated_count, 30)) ||
+          (name == 'distance_preferences_updated' && extra.hasOnly(['distance_cap_set', 'coordinates_available']) && p.distance_cap_set is bool && p.coordinates_available is bool) ||
+          (name == 'readiness_reset' && extra.hasOnly(['reset_member_count', 'reset_reason']) && boundedNumber(p.reset_member_count, 30) && p.reset_reason in ['member_joined', 'preferences_changed']) ||
+          (name == 'winner_satisfaction_submitted' && extra.hasOnly(['happy', 'response_changed', 'response_count', 'happy_count']) && p.happy is bool && p.response_changed is bool && boundedNumber(p.response_count, 30) && boundedNumber(p.happy_count, p.response_count))
+        );
+    }
+    function validParameters(name, p) {
+      return p is map && p.size() <= 40 && (
+        (name in ['first_visit', 'session_start', 'group_creation_started', 'invite_link_copied', 'nominations_started', 'return_to_voting', 'new_group_started'] && p.size() == 0) ||
+        (name == 'screen_view' && p.keys().hasOnly(['firebase_screen', 'firebase_screen_class', 'screen_name', 'page_visit_id']) && boundedText(p.firebase_screen, 80) && boundedText(p.firebase_screen_class, 80) && boundedText(p.screen_name, 80) && boundedText(p.page_visit_id, 80)) ||
+        (name == 'page_time_spent' && p.keys().hasOnly(['screen_name', 'page_visit_id', 'duration_ms', 'flush_reason']) && boundedText(p.screen_name, 80) && boundedText(p.page_visit_id, 80) && boundedNumber(p.duration_ms, 1000000000000) && p.flush_reason in ['blur', 'hidden', 'heartbeat', 'pagehide', 'navigation']) ||
+        (name == 'vote_selection_changed' && p.keys().hasOnly(['selected_restaurant_id', 'action', 'tie_strategy', 'round']) && boundedText(p.selected_restaurant_id, 500) && p.action in ['added', 'removed'] && p.tie_strategy in ['random', 'runoff', 'unknown'] && p.round in [0, 1]) ||
+        (name in ['restaurant_search_started', 'restaurant_search_completed', 'restaurant_search_failed', 'restaurant_search_unavailable'] && p.keys().hasOnly(['search_mode', 'duration_ms', 'status_code', 'result_count', 'error_kind']) && p.search_mode in ['text', 'nearby'] && optionalNumber(p, 'duration_ms') && optionalNumber(p, 'status_code') && optionalNumber(p, 'result_count') && optionalText(p, 'error_kind', 40)) ||
+        ('group_id' in p && validRoomParameters(name, p))
+      );
+    }
+    function validStudyEvent(data) {
+      return data.keys().hasOnly(['schemaVersion', 'studyRunId', 'environment', 'appVersion', 'actorUid',
+          'eventName', 'recordedAt', 'clientTimeMs', 'context', 'parameters']) &&
+        data.schemaVersion == 1 && runId(data.studyRunId) &&
+        data.environment in ['production', 'development', 'test', 'emulator'] &&
+        data.appVersion is string && data.appVersion.size() > 0 && data.appVersion.size() <= 80 &&
+        data.actorUid is string && data.actorUid.size() <= 128 && data.actorUid == request.auth.uid &&
+        data.eventName is string && data.eventName.matches('^[a-z][a-z0-9_]{0,39}$') &&
+        data.recordedAt == request.time &&
+        data.clientTimeMs is number && data.clientTimeMs >= 0 && data.clientTimeMs <= 1000000000000000 &&
+        validContext(data.context) && validParameters(data.eventName, data.parameters);
+    }
     match /rooms/{roomId} {
       allow get: if signedIn();
       allow create: if signedIn() && validRoom(request.resource.data);
       allow update: if signedIn() && validRoom(request.resource.data) &&
         request.resource.data.createdAt == resource.data.createdAt &&
-        request.resource.data.tieStrategy == resource.data.tieStrategy;
+        request.resource.data.tieStrategy == resource.data.tieStrategy &&
+        (!('study' in resource.data) ||
+          (request.resource.data.study.runId == resource.data.study.runId &&
+           request.resource.data.study.environment == resource.data.study.environment &&
+           request.resource.data.study.appVersion == resource.data.study.appVersion &&
+           request.resource.data.study.assignmentSource == resource.data.study.assignmentSource));
       allow list, delete: if false;
     }
     match /profiles/{uid} {
       allow read: if signedIn() && request.auth.uid == uid;
       allow create, update: if signedIn() && request.auth.uid == uid && validProfile(request.resource.data);
+    }
+    match /study_events/{eventId} {
+      allow create: if signedIn() && validStudyEvent(request.resource.data);
+      allow read: if signedIn() && request.auth.token.get('studyAnalyst', false) == true;
+      allow update, delete: if false;
     }
     match /{document=**} {
       allow read, write: if false;

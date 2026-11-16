@@ -5,51 +5,76 @@ import { runInThisContext } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
 import { backendFixture } from "./backend-fixture.ts";
+import type { GroupData } from "../backend/AppBackend";
 
 const studyStart = Date.parse("2026-11-16T01:53:20.605Z");
 const { version: appVersion } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 
-function analyticsFixture({ browser = true, emulator = false, failLogging = false } = {}) {
+function analyticsFixture({ browser = true, emulator = false, failLogging = false, returning = false } = {}) {
   const events: Array<{ name: string; parameters: Record<string, unknown> }> = [];
+  const documents: Array<Record<string, unknown>> = [];
   const warnings: unknown[][] = [];
-  const defaults: Record<string, unknown>[] = [];
-  const initialization: string[] = [];
+  const auth = { currentUser: { uid: "visitor" } as { uid: string } | null, authStateReady: async () => {} };
+  let signIns = 0;
+  let eventSequence = 0;
+  const local = new Map(returning ? [["foodfinder-visitor", "returning-visitor"]] : []);
+  const session = new Map<string, string>();
+  const storage = (map: Map<string, string>) => ({ getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => { map.set(key, value); } });
   let now = 0;
   let focused = true;
   let nextInterval = 0;
   const intervals = new Map<number, () => void>();
-  const page = Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => focused });
+  const page = Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => focused, referrer: "https://example.com/private?secret=omit" });
   const browserWindow = Object.assign(new EventTarget(), {
     setInterval: (callback: () => void) => { intervals.set(++nextInterval, callback); return nextInterval; },
     clearInterval: (id: number) => { intervals.delete(id); },
+    localStorage: storage(local), sessionStorage: storage(session),
+    location: { href: "https://foodfinder.example/room/room-1/vote?utm_source=class&private=omit" },
+    screen: { width: 1920, height: 1080 }, innerWidth: 1000, innerHeight: 800,
   });
   const source = readFileSync(new URL("../backend/firebase.js", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
   const exports = {} as {
     trackEvent: (name: string, parameters?: Record<string, unknown>) => Promise<void>;
     trackScreen: (name: string) => () => void;
+    ensureUser: () => Promise<{ uid: string }>;
+    runAccountAction: (action: () => Promise<unknown>) => Promise<unknown>;
   };
   const noop = () => {};
-  runInThisContext(`(function(require, exports, window, document, performance, process, console) { ${compiled.outputText}\n})`)(
+  runInThisContext(`(function(require, exports, window, document, navigator, performance, process, console) { ${compiled.outputText}\n})`)(
     (id: string) => {
       if (id === "../package.json") return { version: appVersion };
       if (id === "firebase/app") return { getApps: () => [], initializeApp: () => ({}) };
-      if (id === "firebase/auth") return { getAuth: () => ({}), connectAuthEmulator: noop };
-      if (id === "firebase/firestore") return { getFirestore: () => ({}), connectFirestoreEmulator: noop };
-      if (id === "firebase/analytics") return {
-        getAnalytics: () => { initialization.push("initialize"); return {}; }, isSupported: async () => true, setUserProperties: noop,
-        setDefaultEventParameters: (parameters: Record<string, unknown>) => { initialization.push("defaults"); defaults.push(parameters); },
-        logEvent: (_instance: unknown, name: string, parameters: Record<string, unknown>) => {
-          if (failLogging) throw new Error("SDK unavailable");
-          events.push({ name, parameters });
+      if (id === "firebase/auth") return { getAuth: () => auth, connectAuthEmulator: noop,
+        signInAnonymously: async () => { signIns++; await setImmediate(); auth.currentUser = { uid: "anonymous" }; return { user: auth.currentUser }; },
+      };
+      if (id === "firebase/firestore") return {
+        getFirestore: () => ({}), connectFirestoreEmulator: noop,
+        collection: (_db: unknown, path: string) => path,
+        doc: (path: string) => `${path}/event-${++eventSequence}`,
+        serverTimestamp: () => "SERVER_TIMESTAMP",
+        writeBatch: () => {
+          const writes: Array<Record<string, unknown>> = [];
+          return { set: (_ref: string, data: Record<string, unknown>) => { writes.push(data); },
+            commit: async () => {
+              if (failLogging) throw new Error("Write rejected");
+              for (const data of writes) {
+                documents.push(data);
+                events.push({ name: String(data.eventName), parameters: data.parameters as Record<string, unknown> });
+              }
+            },
+          };
         },
       };
       throw new Error(`Unexpected import: ${id}`);
-    }, exports, browser ? browserWindow : undefined, browser ? page : undefined, { now: () => now },
-    { env: { NODE_ENV: "production", NEXT_PUBLIC_USE_FIREBASE_EMULATORS: String(emulator) } },
+    }, exports, browser ? browserWindow : undefined, browser ? page : undefined,
+    { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Chrome/130.0", platform: "MacIntel", language: "en-US" },
+    { now: () => now },
+    { env: { NODE_ENV: "production", NEXT_PUBLIC_USE_FIREBASE_EMULATORS: String(emulator), NEXT_PUBLIC_STUDY_RUN_ID: "test_run" } },
     { warn: (...args: unknown[]) => warnings.push(args) },
   );
-  return { ...exports, events, warnings, intervals, defaults, initialization,
+  return { ...exports, events, documents, warnings, intervals, auth, signIns: () => signIns,
+    navigate: (href: string) => { browserWindow.location.href = href; },
     advance: (milliseconds: number) => { now += milliseconds; },
     heartbeat: () => { for (const callback of intervals.values()) callback(); },
     visibility: (state: string) => { page.visibilityState = state; page.dispatchEvent(new Event("visibilitychange")); },
@@ -59,26 +84,80 @@ function analyticsFixture({ browser = true, emulator = false, failLogging = fals
   };
 }
 
-test("custom analytics events carry the new study cohort and cannot override measurement metadata", async () => {
+test("Firestore events preserve parameters, authenticated ownership and browser/source context", async () => {
   const f = analyticsFixture();
-  await f.trackEvent("decision_completed", { decision_seconds: 60, study_cohort: "old", analytics_version: 1 });
-  assert.deepEqual(f.events, [{ name: "decision_completed", parameters: {
-    decision_seconds: 60, study_cohort: "study_20261116", analytics_version: 2, app_environment: "production", app_version: appVersion,
-  } }]);
-  assert.deepEqual(f.initialization, ["defaults", "initialize"]);
-  assert.deepEqual(f.defaults, [{ study_cohort: "study_20261116", analytics_version: 2,
-    app_environment: "production", app_version: appVersion }]);
+  await f.trackEvent("decision_completed", { decision_seconds: 60 });
+  assert.deepEqual(f.events.map((event) => event.name), ["first_visit", "session_start", "decision_completed"]);
+  const document = f.documents.at(-1)!;
+  assert.equal(document.actorUid, "visitor"); assert.equal(document.studyRunId, "test_run");
+  assert.equal(document.recordedAt, "SERVER_TIMESTAMP"); assert.equal(document.appVersion, appVersion);
+  assert.deepEqual(document.parameters, { decision_seconds: 60 });
+  const context = document.context as Record<string, unknown>;
+  assert.equal(context.utmSource, "class"); assert.equal(context.referrerHost, "example.com");
+  assert.equal(context.page, "/room/:roomId/vote"); assert.equal(context.groupId, "room-1");
+  assert.equal(context.screenWidth, 1920); assert.ok(!JSON.stringify(context).includes("secret=omit"));
 });
 
-test("analytics stays disabled on the server/emulators and logging failures are reported without rejecting", async () => {
-  for (const options of [{ browser: false }, { emulator: true }]) {
-    const f = analyticsFixture(options);
-    await f.trackEvent("group_created");
-    assert.deepEqual(f.events, []);
-  }
+test("telemetry is disabled on the server, uses emulators locally, and surfaces write failures", async () => {
+  const server = analyticsFixture({ browser: false });
+  await server.trackEvent("group_created"); assert.deepEqual(server.events, []);
+  const emulator = analyticsFixture({ emulator: true });
+  await emulator.trackEvent("group_created"); assert.equal(emulator.documents.at(-1)?.environment, "emulator");
   const failed = analyticsFixture({ failLogging: true });
   await failed.trackEvent("group_created");
   assert.equal(failed.warnings.length, 1);
+  assert.deepEqual(failed.documents, []);
+});
+
+test("tracking and application calls share one anonymous sign-in and session-start events", async () => {
+  const f = analyticsFixture(); f.auth.currentUser = null;
+  await Promise.all([f.ensureUser(), f.trackEvent("screen_view"), f.trackEvent("group_creation_started")]);
+  assert.equal(f.signIns(), 1);
+  assert.equal(f.events.filter((event) => event.name === "session_start").length, 1);
+  assert.equal(f.events.filter((event) => event.name === "first_visit").length, 1);
+  assert.ok(f.documents.every((document) => document.actorUid === "anonymous"));
+  const returning = analyticsFixture({ returning: true });
+  await returning.trackEvent("screen_view");
+  assert.equal(returning.events.filter((event) => event.name === "first_visit").length, 0);
+});
+
+test("telemetry guest initialization cannot overwrite a simultaneous account login", async () => {
+  const f = analyticsFixture(); f.auth.currentUser = null;
+  const guest = f.ensureUser();
+  await Promise.resolve();
+  const account = f.runAccountAction(async () => { f.auth.currentUser = { uid: "registered" }; });
+  const write = f.trackEvent("group_creation_started");
+  await Promise.all([guest, account, write]);
+  assert.deepEqual(f.auth.currentUser, { uid: "registered" });
+  assert.equal(f.signIns(), 1);
+  assert.ok(f.documents.every((document) => document.actorUid === "registered"));
+});
+
+test("navigation during sign-in does not move an outgoing page's time to the next room", async () => {
+  const f = analyticsFixture(); f.auth.currentUser = null;
+  const write = f.trackEvent("page_time_spent", { screen_name: "voting", page_visit_id: "old-visit", duration_ms: 1200, flush_reason: "navigation" });
+  f.navigate("https://foodfinder.example/room/room-2/results");
+  await write;
+  const context = f.documents.at(-1)?.context as Record<string, unknown>;
+  assert.equal(context.groupId, "room-1");
+  assert.equal(context.page, "/room/:roomId/vote");
+});
+
+test("sessions renew after inactivity without creating another first visit, and malformed events are rejected", async (t) => {
+  let now = studyStart;
+  t.mock.method(Date, "now", () => now);
+  const f = analyticsFixture();
+  await f.trackEvent("group_creation_started");
+  now += 31 * 60 * 1000;
+  await f.trackEvent("group_creation_started");
+  assert.equal(f.events.filter((event) => event.name === "session_start").length, 2);
+  assert.equal(f.events.filter((event) => event.name === "first_visit").length, 1);
+  assert.equal(new Set(f.documents.map((document) => (document.context as Record<string, unknown>).visitorId)).size, 1);
+  const count = f.documents.length;
+  await f.trackEvent("not a valid event");
+  await f.trackEvent("screen_view", { nested: { invalid: true } });
+  assert.equal(f.documents.length, count);
+  assert.equal(f.warnings.length, 2);
 });
 
 test("page timing excludes hidden/unfocused time, checkpoints long visits, and cleans up once", async () => {
@@ -142,7 +221,12 @@ test("group joins preserve returning_member while snapshots do not duplicate act
   let now = studyStart - 1;
   t.mock.method(Date, "now", () => now);
   const f = backendFixture();
-  await f.backend.createGroup({ groupName: "Legacy", location: "Atlanta" });
+  const legacy = await f.backend.createGroup({ groupName: "Legacy", location: "Atlanta" });
+  const oldGroup = f.store.get(`rooms/${legacy.roomId}`) as GroupData;
+  delete oldGroup.study;
+  f.set(`rooms/${legacy.roomId}`, oldGroup);
+  f.analyticsEvents.length = 0;
+  await f.backend.joinGroup(legacy.roomId, "Legacy member");
   assert.equal(f.analyticsEvents[0].parameters.group_cohort, "legacy");
   f.analyticsEvents.length = 0;
   now = studyStart;
@@ -159,7 +243,7 @@ test("group joins preserve returning_member while snapshots do not duplicate act
   assert.equal(f.analyticsEvents[3].parameters.returning_member, true);
   for (const event of f.analyticsEvents) {
     assert.equal(event.parameters.tie_strategy, "runoff");
-    assert.equal(event.parameters.group_cohort, "study_20261116");
+    assert.equal(event.parameters.group_cohort, "test_run");
     assert.equal(event.parameters.group_id, roomId);
     assert.ok(!JSON.stringify(event).includes("Private"));
   }
@@ -190,6 +274,8 @@ test("shortlist analytics distinguishes all-pruned nominations from no nominatio
   assert.equal(evaluated[1].parameters.eligible_count, 0);
   assert.equal(evaluated[1].parameters.pruned_count, 1);
   assert.equal(evaluated[1].parameters.all_pruned, true);
+  const study = (f.store.get(`rooms/${roomId}`) as GroupData).study!;
+  assert.equal(study.shortlistEvaluations, 2); assert.equal(study.allChoicesPruned, 1);
   await f.backend.submitPreferences(roomId, "one", { budgetRanges: [...f.backend.ALL_BUDGET_RANGES] });
   await f.backend.markMemberReadyForVoting(roomId, "one");
   assert.equal(f.analyticsEvents.filter((event) => event.name === "voting_started").length, 1);
@@ -244,5 +330,11 @@ for (const scenario of ["random", "runoff", "runoff_random", "no_tie"] as const)
     assert.equal(feedback[1].parameters.response_changed, true);
     assert.equal(feedback[1].parameters.response_count, 1);
     assert.equal(feedback[1].parameters.happy_count, 0);
+    const study = (f.store.get(`rooms/${roomId}`) as GroupData).study!;
+    assert.equal(study.initialTies, scenario === "no_tie" ? 0 : 1);
+    assert.equal(study.runoffTies, scenario === "runoff_random" ? 1 : 0);
+    assert.equal(study.decisionSeconds, decisions[0].parameters.decision_seconds);
+    assert.equal(study.resolutionMethod, decisions[0].parameters.resolution_method);
+    assert.equal(study.happyCount, 0); assert.equal(study.responseCount, 1);
   });
 }

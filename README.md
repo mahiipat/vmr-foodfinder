@@ -50,11 +50,18 @@ The rules file is not automatically deployed. To use it on the real Firebase pro
 npx -y firebase-tools@latest deploy --only firestore:rules --project YOUR_PROJECT
 ```
 
-### Analytics and app-chosen tiebreak comparisons
+### Firestore study tracking and app-chosen tiebreak comparisons
 
-Analytics still collects the original events and standard GA4 user activity, engagement, acquisition/source, retention, and technical/device data. Device category, OS/version, browser/platform, and screen resolution remain available as supported by the browser, consent settings, and GA4; detailed device model information can be limited on the web. No collection is disabled for the purpose of excluding developer history from reports. Emulators and server-side rendering still do not send analytics.
+All application telemetry now writes directly to **Firestore**, not Google/Firebase Analytics. The Analytics SDK initialization and measurement ID have been removed. Existing GA history is neither deleted nor imported; measurements that were never collected cannot be recovered. Server rendering does not emit events. Local Auth/Firestore emulators collect events under `environment=emulator`, without touching production.
 
-Before initializing Analytics, `setDefaultEventParameters` attaches `analytics_version=2`, `study_cohort=study_20261116`, `app_environment` (`production`, `development`, or `test`), and `app_version` to subsequent SDK events, **including automatic events**. Explicit custom events also receive these parameters. `app_version` comes from the package manifest (bump it for a new application release); it is separate from the analytics schema version. Register it as a custom dimension for web reports. These labels do not change standard GA4 acquisition/device collection or retroactively label historical events.
+Data is stored in two places:
+
+- **`study_events/{autoId}`**: append-only event records with `eventName`, the original `parameters`, server `recordedAt`, client `clientTimeMs`, `actorUid`, `schemaVersion`, `studyRunId`, `environment`, `appVersion`, and browser/session `context`. The normal screen timing and custom event APIs remain unchanged.
+- **`rooms/{roomId}.study`**: a small summary persisted **inside the same transaction as the group action**: immutable run/environment/version/assignment metadata, shortlist evaluations/empty evaluations/all-pruned attempts, first-round/runoff ties, voting/runoff/decision timestamps, decision seconds, actual resolution, and current happy/response counts. Summaries survive raw-event delivery failures and transaction retries do not double-increment counters. Existing rooms without this field remain compatible and are not relabeled as new study groups.
+
+Context includes anonymous browser visitor/session IDs, a normalized page, room ID where applicable, referrer **hostname**, bounded UTM source/medium/campaign labels, user-agent/platform/language/timezone, device category, screen resolution, and viewport size. No full referrer URL, arbitrary query string, email, or participant name is collected in telemetry. Events retain the existing `selected_restaurant_id`, which can contain a typed restaurant name. Do not put personal information in nominations or campaign labels.
+
+`first_visit` and `session_start` replace GA's automatic equivalents for this app. Browser identity is kept in local storage; sessions use tab session storage and restart after 30 minutes without an event. Storage-blocked browsers use temporary identity and log a warning. These provide basic activity/return-visit analysis, **not** GA's modeled attribution, cross-device identity, or complete acquisition/retention products. OS/browser/version details can be interpreted from the stored user agent, subject to browser reduction; exact hardware model is often unavailable. `appVersion` comes from the package manifest. Guests still need no account form: telemetry and room actions share one anonymous Firebase sign-in.
 
 #### Original event contracts retained
 
@@ -71,9 +78,9 @@ Before initializing Analytics, `setDefaultEventParameters` attaches `analytics_v
 | `return_to_voting`, `new_group_started` | Retained. |
 | `screen_view` | Retains `firebase_screen`/`firebase_screen_class` for home, group_room, nominations, voting, and results; also covers login, signup, and profile. Adds `screen_name` and a per-visit identifier for timing joins. |
 
-The earlier instrumentation draft omitted `returning_member` and `selected_restaurant_id` and only emitted first joins; those original contracts are restored. Some successful-write events moved from screen handlers to the transaction wrapper to prevent duplicate reporting, without removing their original event names.
+All original event names and their listed parameters remain tracked. Successful-write events are generated centrally after a committed action, not by every member's room listener.
 
-Group lifecycle events also carry an opaque `group_id`, a comparison label `experiment_id=tie_strategy_v1`, the app-chosen `tie_strategy` (`random` or `runoff`), `round`, `phase`, member/nomination/candidate counts, elapsed seconds since group creation, and the dietary-pruning policy. No member names, group names, addresses, coordinates, search text, or full ballots are included in these custom parameters. The original `selected_restaurant_id` is retained; name-only nomination IDs can contain a restaurant's name, so never put personal information in nominations. GA4 still collects its standard device/page metadata.
+Group lifecycle parameters retain the opaque `group_id`, comparison label `experiment_id=tie_strategy_v1`, app-chosen `tie_strategy` (`random` or `runoff`), `round`, `phase`, member/nomination/candidate counts, elapsed seconds since creation, and dietary-pruning policy. `group_cohort` is the room's immutable study run, or `legacy` for older rooms.
 
 | Events | Measurement |
 | --- | --- |
@@ -96,37 +103,59 @@ The app still randomly chooses the tiebreak method when creating a group; **Fire
 
 #### Time spent on every application page
 
-GA4 already calculates standard engagement time. Additionally, `page_time_spent` explicitly measures time while a page is **visible and focused**, across home, group_room, nominations, voting, results, login, signup, and profile. It pauses when hidden/unfocused, flushes on navigation/tab hiding, resumes after back-forward cache restoration, and checkpoints active visits every 30 seconds. Cleanup removes listeners/timers and does not count the same interval twice. This is foreground time, not proof of continuous interaction, and abrupt browser termination can still lose the final partial interval.
+`page_time_spent` measures time while a page is **visible and focused**, across home, group_room, nominations, voting, results, login, signup, and profile. It pauses when hidden/unfocused, flushes on navigation/tab hiding, resumes after back-forward cache restoration, and checkpoints active visits every 30 seconds. Cleanup removes listeners/timers and does not count the same interval twice. This is foreground time, not proof of continuous interaction, and abrupt browser termination can still lose the final partial interval.
 
-Sum `duration_ms` for each `page_visit_id` to obtain the visit's page time; average those visit totals per `screen_name`. Do not average individual heartbeat segments as though each were a separate visit. The matching `screen_view` includes the same visit ID. This custom metric intentionally does **not** populate `engagement_time_msec`, so it does not double-count GA4's native engagement metric. Register `screen_name` as an event-scoped dimension and `duration_ms` as a custom time metric in milliseconds; do not register high-cardinality `page_visit_id` as a dimension.
+Sum `duration_ms` for each browser visitor and `page_visit_id` to obtain the visit's page time; average those visit totals per `screen_name`. Do not average heartbeat segments as though each were a separate visit. The matching `screen_view` includes the same visit ID. No GA custom dimensions, BigQuery linkage, or Analytics processing delay is needed.
 
-Group events are emitted by the acting client **after a successful Firestore commit**, never by a snapshot listener or inside a transaction retry. No room schema, security rules, experiment allocation, or realtime mechanism changed. Analytics remains best-effort: blocked scripts, offline clients, or closing a tab immediately after a write can lose events. Timing uses client clocks and includes waiting/idle time; it is approximate wall-clock time, not active screen time. Subtract/join `voting_started` and `decision_completed` timestamps for voting duration, and `runoff_started` and `decision_completed` for tiebreak duration. No historical events are backfilled.
+Raw events are sent by the acting client **after a successful group commit**, never by snapshot listeners or inside a retry. Raw writes remain best-effort: networking, denied rules, or tab closure can lose them; failures are explicitly logged to the browser console. Per-group study counters/results are part of the room transaction, so those core results do not depend on the raw log succeeding. `recordedAt` is a Firestore server timestamp; decision durations and phase timestamps use client clocks and include waiting/idle time. Browser heartbeat writes have a cost (about two per foreground minute per tab), in addition to action events.
 
-#### Ignore the earlier test data
+#### Keep developer tests separate from participant runs
 
-Until a different actual study start is provided, the reporting cutoff is this follow-up request: **November 15, 2026 at 8:53:20.605 PM EST** (`2026-11-16T01:53:20.605Z`). Existing Analytics data is **not deleted or reset**, and all original event collection remains enabled. New group events label rooms created before that instant as `group_cohort=legacy`; later rooms use `group_cohort=study_20261116`.
+The default run ID is **`developer_testing`**, including production builds. Before a real study, set this public build-time setting in your local/deployment environment and restart/rebuild:
 
-To exclude developer history from **all metrics and events**, set the report/exploration date range to the actual study period. Date filters apply to automatic and custom events, without changing what is collected. If the study starts November 16 in the GA4 property's timezone, starting the report on that date excludes all earlier calendar days. Standard date-range filters work at calendar-day granularity and cannot express this request's precise mid-day boundary. For that exact boundary, query the BigQuery export with:
-
-```sql
-WHERE event_timestamp >= UNIX_MICROS(TIMESTAMP('2026-11-16T01:53:20.605Z'))
+```bash
+NEXT_PUBLIC_STUDY_RUN_ID=pilot_01
 ```
 
-For data collected with this deployed version, additionally filter `study_cohort=study_20261116` and `app_environment=production` once those custom dimensions are registered. The default cohort label now also reaches automatic SDK events; earlier automatic data has no label. Do not apply `group_cohort` globally to activity/acquisition/device reports, since only group lifecycle events have it. Use `group_cohort=study_20261116` for the group-comparison report to exclude old rooms. No report filters or custom definitions have been applied to the live GA4 property from this workspace yet. The code cannot recover missing measurements between the cutoff and deployment or reclassify older events.
+Run IDs allow 1–80 letters, digits, underscores, or hyphens. Create fresh rooms after changing the run ID; existing room summaries keep their original immutable run. Use a new ID for each participant batch or study run. Filtering `studyRunId`/`study.runId` and environment excludes developer/legacy data without deleting anything or depending on an arbitrary date cutoff. Do not conduct later developer testing using the live participant-run deployment; use a separate run/environment. Browser visitor IDs persist across runs, while exported first/last-seen dates describe observations **within the selected run**, not a person's lifetime history.
 
-A timestamp or production build alone cannot distinguish future developer testing on the live site from participant use. Exclude known internal traffic in report comparisons/segments, or agree on a fresh study cohort at the actual start. Do not activate destructive data-exclusion filters merely to hide historical tests. Filtering a reporting period also does not reset a developer browser's existing GA identity/first-visit date; retention and acquisition still use GA4's normal identity and attribution rules.
+#### Deployment and access
 
-In **GA4 Admin > Custom definitions**, create event-scoped dimensions for `study_cohort`, `group_cohort`, `app_environment`, `app_version`, `screen_name`, `experiment_id`, `tie_strategy`, `assignment_source`, `resolution_method`, and `random_fallback`; add custom metrics for `duration_ms`, `decision_seconds`, `elapsed_seconds`, `pruned_count`, and `eligible_count` as needed. New definitions can take 24–48 hours to appear. Do not register high-cardinality `group_id` as a custom dimension; use it in BigQuery instead. Use DebugView/Realtime to check events after deployment.
+**Deploy the updated rules before the updated app**, because new room summaries require the optional `study` field and telemetry writes require the new collection rule. Rules remain compatible with older rooms. Using your locally authenticated Firebase CLI:
 
-Useful per-variant report columns are group count, completion rate, nonempty shortlist evaluations, all-pruned count/rate, completed first rounds, first-round tie count/rate, runoff count, random-fallback count, mean/median decision time, and final satisfaction. Pruning rate is `all_choices_pruned / nonempty shortlist_evaluated` (attempt-based); initial tie rate is first-round ties divided by completed first rounds (`round=0`), not ties divided by page views or votes. Compute time statistics over completed groups and report incomplete groups separately. For final satisfaction, take the latest feedback event per group and use its `happy_count`/`response_count`, rather than summing cumulative totals or counting changed replies as new respondents.
+```bash
+firebase login
+firebase firestore:databases:list --project movie-voting-app-663bb
+firebase firestore:databases:get '(default)' --project movie-voting-app-663bb
+firebase deploy --only firestore:rules --project movie-voting-app-663bb
+```
+
+The implementation was validated against the **standard-edition local Firestore emulator**. The CLI was not authenticated to the cloud during this change, so the live database edition/rules were not inspected or deployed. No new cloud database was created.
+
+Prototype event rules allow authenticated authors to create bounded records with their own UID and a server timestamp, deny all event edits/deletes, and restrict event reads to an externally granted `studyAnalyst` custom claim. IAM-authorized console/admin REST exports are separate and do not need this claim. Clients cannot grant themselves analyst access. New event names/parameter shapes must also be added to the event-specific rules validators; unsupported writes produce a browser-console warning. The existing class-prototype room rules still permit authenticated reads/writes of shared room documents; that pre-existing trust model is not a production confidentiality boundary. Client-reported study metrics are not tamper-proof. Review the rules/privacy policy before collecting real personal data or broadly sharing the app.
 
 #### Reading data and making tables
 
-The app's Firebase web configuration permits event collection, **not reporting access**. Tables can be generated from an uploaded CSV/JSON export, an authorized [GA4 Data API](https://developers.google.com/analytics/devguides/reporting/data/v1) connection, or an authorized [BigQuery export](https://firebase.google.com/docs/projects/bigquery-export). No reporting credentials or cloud configuration were added by this change.
+In the Firebase console, inspect **Firestore Database > Data > study_events**, or a room's **study** map. For a repeatable export, use the [study exporter](scripts/export-study.mjs), which uses Firestore REST and needs **Google Cloud IAM read/query permission** (for example, Datastore Viewer). A Firebase web API key or ordinary participant login does not grant access to everyone else's telemetry. No private key needs to be shared with the assistant or put in the app.
 
-No secret API key is needed to configure a report in the browser. Provide the numeric **GA4 Property ID** (GA4 Admin > Property details, not the `G-...` measurement ID) and share a signed-in Analytics browser with the appropriate access. Reading reports requires access to the property; property-level custom definitions/report customization require Editor-level access. Alternatively, authorize the Google Analytics Data API with your own OAuth login or an appropriately permitted service account through local credentials. Never paste passwords, access tokens, or service-account private keys into chat or the app's client environment. A Firebase web API key cannot read Analytics reports. Uploaded report exports are sufficient when no direct connection is desired.
+With Google Cloud CLI installed and authorized locally:
 
-For raw group-level A/B analysis, link Analytics to BigQuery through **Firebase Project settings > Integrations > BigQuery** (or GA4's BigQuery link). Enable export before collecting study data; do not rely on historical backfill. BigQuery retains event parameters without requiring GA4 custom definitions and supports exact timestamp filtering, group joins, medians, and latest-response summaries. GA4 reporting generally needs registered custom definitions for these parameters. Authorized read/query permissions are required; do not put service-account credentials into client code or commit them. BigQuery storage/queries may incur charges beyond free limits.
+```bash
+gcloud auth login
+npm run study:export -- --project movie-voting-app-663bb --run pilot_01
+```
+
+Alternatively, supply a short-lived OAuth token through `FIRESTORE_ACCESS_TOKEN` in the local terminal environment, never chat/client code. The Firebase CLI login used for deployment and the Google Cloud CLI login used for export are distinct. To save reports outside the repository, pass `--out /absolute/private/path/study-report`; its parent directory must already exist. Use `--database DATABASE_ID` for a non-default database.
+
+The exporter filters by run on the server, paginates through all records, then filters by environment (`production` by default). It writes:
+
+- `study-report.json`: raw selected event records and all derived tables.
+- `study-report-groups.csv`: one row per room, including chosen/actual method, timings, pruning/tie counts, and current happy/unhappy/response counts.
+- `study-report-methods.csv`: side-by-side randomized-group comparison; explicit developer strategy overrides remain in group rows but are excluded from these totals. Includes nonempty-pruning and completed-first-round tie rates, completion counts, decision time, and satisfaction totals.
+- `study-report-pageVisits.csv`: summed foreground duration per browser/page visit, including zero-duration screen visits and grouping across guest-account upgrades.
+- `study-report-visitors.csv`: first/last observations, session counts, and active dates within the run, for basic retention/activity tables. The JSON also contains event counts and browser/source context for custom breakdowns.
+
+Pruning rate excludes evaluations with no nominations. Initial tie rate uses completed first rounds, not page views or individual votes. Decision averages use completed groups; incomplete groups remain visible separately. Satisfaction uses persisted latest responses, not a sum of repeated feedback events. Room summaries in the export omit names, addresses, nominations, and ballots; raw events still contain pseudonymous identifiers/browser metadata and must be treated as private research data. Default report filenames are ignored by Git. Future assistant analysis can use these exports or your authorized local reporting connection; it does not gain automatic access just because Firestore is used.
 
 ### Local testing
 
@@ -139,7 +168,7 @@ npx -y firebase-tools@latest emulators:start --project demo-foodfinder --only au
 Start Next.js in another terminal:
 
 ```bash
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=demo-foodfinder NEXT_PUBLIC_USE_FIREBASE_EMULATORS=true npm run dev -- --port 3100
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=demo-foodfinder NEXT_PUBLIC_USE_FIREBASE_EMULATORS=true NEXT_PUBLIC_STUDY_RUN_ID=local_demo npm run dev -- --port 3100
 ```
 
 Open http://localhost:3100 and use a normal window plus an incognito window to represent separate guests. Create a group, add different nominations, mark ready, and vote. Keep every budget selected for the normal name-only flow; restricted budgets exercise the empty-shortlist/reset behavior until restaurant price data is supplied.
