@@ -1,6 +1,6 @@
 import type { GroupCenter } from "../../../../lib/places";
 
-// Turns a city or ZIP code ("Atlanta", "30332") into coordinates for centering
+// Turns an address, place, city or ZIP code ("350 Ferst Dr NW, Atlanta", "30332") into coordinates for centering
 // restaurant search. Uses Places Text Search so no extra Google API needs enabling.
 type TextSearchResponse = {
     places?: {
@@ -16,9 +16,9 @@ export async function GET(request: Request) {
     }
 
     const { searchParams } = new URL(request.url);
-    const query = (searchParams.get("query") ?? "").trim().slice(0, 100);
+    const query = (searchParams.get("query") ?? "").trim().slice(0, 200);
     if (query.length < 2) {
-        return Response.json({ error: "Enter a city or ZIP code." }, { status: 400 });
+        return Response.json({ error: "Enter an address." }, { status: 400 });
     }
 
     const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
@@ -39,7 +39,7 @@ export async function GET(request: Request) {
     const data: TextSearchResponse = await res.json();
     const match = data.places?.[0];
     if (!match?.location) {
-        return Response.json({ error: "Couldn't find that city or ZIP code." }, { status: 404 });
+        return Response.json({ error: "Couldn't find that address." }, { status: 404 });
     }
 
     const center: GroupCenter = {
