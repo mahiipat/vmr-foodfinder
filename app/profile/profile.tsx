@@ -7,6 +7,7 @@ import { auth } from "../../backend/firebase";
 import { ALL_BUDGET_RANGES, budgetRangeLabels, userErrorMessage, type BudgetRange } from "../../backend/AppBackend";
 import { getAccountPreferences, saveAccountPreferences } from "../../lib/accountPreferences";
 import { trackScreen } from "../../lib/analytics";
+import { ALL_DIETARY_TAGS, dietaryLabels, type DietaryTag } from "../../lib/dietary";
 
 export default function Profile() {
   const router = useRouter();
@@ -17,6 +18,7 @@ export default function Profile() {
   const [message, setMessage] = useState("");
   const [roomCode, setRoomCode] = useState("");
   const [budgets, setBudgets] = useState<BudgetRange[]>([...ALL_BUDGET_RANGES]);
+  const [dietaryNeeds, setDietaryNeeds] = useState<DietaryTag[]>([]);
   const [distanceEnabled, setDistanceEnabled] = useState(false);
   const [distance, setDistance] = useState("5");
   const [prefsBusy, setPrefsBusy] = useState(false);
@@ -33,6 +35,7 @@ export default function Profile() {
           setBudgets(prefs.budgetRanges);
           setDistanceEnabled(prefs.distanceCapMiles !== null);
           setDistance(String(prefs.distanceCapMiles ?? 5));
+          setDietaryNeeds(prefs.dietaryNeeds ?? []);
         }).catch(() => setMessage("Unable to load saved preferences."));
       }
     });
@@ -62,7 +65,7 @@ export default function Profile() {
     try {
       const cap = Number(distance);
       if (distanceEnabled && (!Number.isFinite(cap) || cap <= 0)) throw new Error("Enter a valid distance in miles.");
-      await saveAccountPreferences(user.uid, { budgetRanges: budgets, distanceCapMiles: distanceEnabled ? cap : null });
+      await saveAccountPreferences(user.uid, { budgetRanges: budgets, distanceCapMiles: distanceEnabled ? cap : null, dietaryNeeds });
       setMessage("Your default preferences have been saved.");
     } catch (error) {
       setMessage(userErrorMessage(error, "Unable to save preferences."));
@@ -138,7 +141,42 @@ export default function Profile() {
                     </label>
                   ))}
                 </div>
-                <p className="mt-9 text-[10px] uppercase tracking-[0.3em] text-[#777466]">02 / Your distance</p>
+                <div className="mt-9">
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">
+                    02 / Your dietary needs
+                  </p>
+
+                  <h3 className="mt-3 font-serif text-3xl">
+                    Dietary needs.
+                  </h3>
+
+                  <p className="mt-3 text-sm text-[#68665A]">
+                    Optional. Leave blank if you can eat anywhere.
+                  </p>
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                      {ALL_DIETARY_TAGS.map((option) => (
+                        <label
+                          key={option}
+                          className="flex cursor-pointer items-center gap-3 border border-[#343329]/25 px-4 py-3 text-sm"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={dietaryNeeds.includes(option)}
+                            onChange={() =>
+                              setDietaryNeeds((prev) =>
+                                prev.includes(option)
+                                  ? prev.filter((value) => value !== option)
+                                  : [...prev, option]
+                              )
+                            }
+                            className="accent-[#566B48]"
+                          />
+                          {dietaryLabels[option]}
+                        </label>
+                      ))}
+                    </div>
+                </div>
+                <p className="mt-9 text-[10px] uppercase tracking-[0.3em] text-[#777466]">03 / Your distance</p>
                 <h3 className="mt-3 font-serif text-3xl">Keep it close.</h3>
                 <label className="mt-5 flex cursor-pointer items-center gap-3 text-sm">
                   <input type="checkbox" checked={distanceEnabled} onChange={(event) => setDistanceEnabled(event.target.checked)} className="peer sr-only" />
@@ -154,7 +192,7 @@ export default function Profile() {
                 <button disabled={prefsBusy} type="submit" className="mt-7 w-full rounded-full bg-[#343329] px-8 py-4 text-[11px] uppercase tracking-[0.2em] text-white disabled:opacity-40">{prefsBusy ? "Saving..." : "Save preferences →"}</button>
               </form>
               <form onSubmit={openRoom} className="mt-12 border-t border-[#343329]/20 pt-8">
-                <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">03 / Join your friends</p>
+                <p className="text-[10px] uppercase tracking-[0.3em] text-[#777466]">04 / Join your friends</p>
                 <h3 className="mt-3 font-serif text-3xl">Have a room code?</h3>
                 <p className="mt-3 text-sm text-[#68665A]">Enter the code to join under your account name. Your saved defaults will be applied on your first visit.</p>
                 <input aria-label="Room code" placeholder="Enter room code" value={roomCode} onChange={(event) => setRoomCode(event.target.value)} className="mt-6 w-full border-b border-[#343329]/40 bg-transparent px-2 py-3 text-center outline-none" />

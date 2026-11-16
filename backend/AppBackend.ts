@@ -172,7 +172,7 @@ export function joinMember(group: GroupData, uid: string, name: string, defaults
   group.preferences[uid] = { memberId: uid, budgetRanges: defaults.budgetRanges ?? [...ALL_BUDGET_RANGES],
     favorites: defaults.favorites ?? [], readyToVote: false,
     distanceCapMiles: defaults.distanceCapMiles ?? null, hostLocation: defaults.hostLocation ?? null,
-    dietaryNeeds: [] };
+    dietaryNeeds: defaults.dietaryNeeds ?? [] };
   resetReady(group);
 }
 export function resetReady(group: GroupData) {
@@ -327,7 +327,8 @@ export type Profile = {
   favorites: string[];
   budgetRanges: BudgetRange[];
   distanceCapMiles: number | null;
-  hostLocation: { lat?: number; lng?: number; address?: string } | null;
+  hostLocation: HostLocation | null;
+  dietaryNeeds: DietaryTag[];
 };
 
 const budgetRanges: BudgetRange[] = [
@@ -341,6 +342,7 @@ export function defaultProfile(displayName = ""): Profile {
     budgetRanges: [...budgetRanges],
     distanceCapMiles: null,
     hostLocation: null,
+    dietaryNeeds: [],
   };
 }
 
@@ -350,7 +352,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function validateProfile(input: unknown): Profile {
   if (!isRecord(input) || Object.keys(input).some((key) => ![
-    "displayName", "favorites", "budgetRanges", "distanceCapMiles", "hostLocation",
+    "displayName", "favorites", "budgetRanges", "distanceCapMiles", "hostLocation", "dietaryNeeds",
   ].includes(key))) {
     throw new RoomError("Invalid profile fields.");
   }
@@ -400,6 +402,7 @@ export function validateProfile(input: unknown): Profile {
     budgetRanges: [...input.budgetRanges],
     distanceCapMiles: input.distanceCapMiles,
     hostLocation,
+    dietaryNeeds: dietaryNeeds(input.dietaryNeeds ?? []),
   };
 }
 
@@ -465,6 +468,7 @@ export async function signUp(email: string, password: string, name: string) {
     budgetRanges: ["UNDER_10", "TEN_TO_THIRTY", "THIRTY_TO_SIXTY", "SIXTY_PLUS"],
     distanceCapMiles: null,
     hostLocation: null,
+    dietaryNeeds: [],
   });
   return credential;
 }
