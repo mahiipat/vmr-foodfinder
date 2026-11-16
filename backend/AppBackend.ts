@@ -1,6 +1,6 @@
 import { createUserWithEmailAndPassword, EmailAuthProvider, linkWithCredential, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut, updateProfile, type User } from "firebase/auth";
 import { addDoc, collection, doc, getDoc, onSnapshot, runTransaction, setDoc } from "firebase/firestore";
-import { auth, db } from "./firebase";
+import { ANALYTICS_STUDY_STARTED_AT, auth, db, trackEvent } from "./firebase";
 // type-only so the test fixture (which only allows Firebase imports at runtime) still loads this file
 import type { DietaryTag } from "../lib/dietary";
 
@@ -54,6 +54,23 @@ export type RoomState = {
   reaskReason: string | null; feedback: GroupData["feedback"];
   satisfactionByMember: Record<string, boolean>;
 };
+type RoomEvent = { name: string; parameters?: Record<string, string | number | boolean> };
+
+function reportRoomEvents(group: GroupData, roomId: string, events: RoomEvent[]) {
+  const context = {
+    group_id: roomId, experiment_id: "tie_strategy_v1", tie_strategy: group.tieStrategy,
+    group_cohort: group.createdAt >= ANALYTICS_STUDY_STARTED_AT ? "study_20261116" : "legacy",
+    phase: group.phase, round: group.round, member_count: Object.keys(group.members).length,
+    nomination_count: Object.keys(group.restaurants).length, candidate_count: group.candidateIds.length,
+    elapsed_seconds: Math.max(0, (Date.now() - group.createdAt) / 1000),
+    dietary_policy: PRUNE_UNKNOWN_DIETARY ? "prune_unknown" : "keep_unknown",
+  };
+  for (const event of events) {
+    void trackEvent(event.name, { ...context, ...event.parameters }).catch((error: unknown) => {
+      console.warn("Unable to record room analytics.", error);
+    });
+  }
+}
 export class RoomError extends Error {
   status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
@@ -189,23 +206,34 @@ export function eligibleRestaurants(group: GroupData): Restaurant[] {
       ? ALL_BUDGET_RANGES.every((range) => preference.budgetRanges.includes(range))
       : preference.budgetRanges.includes(restaurant.budgetRange)));
 }
-export function markReady(group: GroupData, uid: string, ready: boolean) {
+export function markReady(group: GroupData, uid: string, ready: boolean): RoomEvent[] {
   const preference = requireMember(group, uid);
   requireNominations(group);
   if (typeof ready !== "boolean") throw new RoomError("Invalid readiness value.");
+  const changed = preference.readyToVote !== ready;
   preference.readyToVote = ready;
-  if (!Object.values(group.preferences).every((p) => p.readyToVote)) return;
+  const events: RoomEvent[] = changed ? [{ name: ready ? "ready_to_vote" : "readiness_withdrawn" }] : [];
+  if (!Object.values(group.preferences).every((p) => p.readyToVote)) return events;
   const candidates = eligibleRestaurants(group);
+  const nominationCount = Object.keys(group.restaurants).length;
+  events.push({ name: "shortlist_evaluated", parameters: {
+    eligible_count: candidates.length, pruned_count: nominationCount - candidates.length,
+    all_pruned: nominationCount > 0 && candidates.length === 0,
+  } });
   if (candidates.length === 0) {
     resetReady(group);
     group.reaskReason = "No restaurants survived the group's constraints. Please add more restaurants with known prices or widen your budget ranges.";
-    return;
+    events.push({ name: nominationCount > 0 ? "all_choices_pruned" : "shortlist_empty",
+      parameters: { reset_member_count: Object.keys(group.members).length } });
+    return events;
   }
   group.candidateIds = candidates.map((r) => r.id);
   group.phase = "voting";
   group.reaskReason = null;
+  events.push({ name: "voting_started", parameters: { eligible_count: candidates.length } });
+  return events;
 }
-export function castVote(group: GroupData, uid: string, ids: unknown, round: unknown, random: () => number = Math.random) {
+export function castVote(group: GroupData, uid: string, ids: unknown, round: unknown, random: () => number = Math.random): RoomEvent[] {
   requireMember(group, uid);
   if ((group.phase !== "voting" && group.phase !== "runoff") || round !== group.round) {
     throw new RoomError("This voting round is closed. Refresh the ballot.", 409);
@@ -214,21 +242,38 @@ export function castVote(group: GroupData, uid: string, ids: unknown, round: unk
       ids.some((id) => typeof id !== "string" || !group.candidateIds.includes(id))) throw new RoomError("Select eligible restaurants.");
   const unique = [...new Set(ids)] as string[];
   if (group.phase === "runoff" && unique.length !== 1) throw new RoomError("Choose exactly one restaurant in the runoff.");
+  const events: RoomEvent[] = [{ name: "votes_submitted", parameters: {
+    selected_restaurant_count: unique.length, replaced_ballot: Boolean(group.votes[uid]?.length), round: group.round,
+    candidate_count: group.candidateIds.length, phase: group.phase,
+  } }];
   group.votes[uid] = unique;
-  if (!Object.keys(group.members).every((id) => group.votes[id]?.length)) return;
+  if (!Object.keys(group.members).every((id) => group.votes[id]?.length)) return events;
   const tally = tallyVotes(group);
   const max = Math.max(...Object.values(tally));
   const tied = group.candidateIds.filter((id) => tally[id] === max);
+  const roundOutcome = { round: group.round, phase: group.phase, candidate_count: group.candidateIds.length,
+    had_tie: tied.length > 1, tied_count: tied.length };
+  events.push({ name: "voting_round_completed", parameters: roundOutcome });
+  if (tied.length > 1) events.push({ name: "tie_detected", parameters: roundOutcome });
   if (tied.length > 1 && group.tieStrategy === "runoff" && group.round === 0) {
     group.initialVotes = group.votes;
     group.votes = {};
     group.candidateIds = tied;
     group.round = 1;
     group.phase = "runoff";
-    return;
+    events.push({ name: "runoff_started", parameters: { tied_count: tied.length } });
+    return events;
   }
   group.winnerId = tied.length === 1 ? tied[0] : tied[Math.min(tied.length - 1, Math.floor(random() * tied.length))];
   group.phase = "results";
+  const resolution = tied.length > 1 ? "random" : group.round === 1 ? "runoff" : "none";
+  const outcome = { resolution_method: resolution, had_tie: tied.length > 1 || group.round === 1,
+    random_fallback: group.round === 1 && tied.length > 1 };
+  if (outcome.had_tie) events.push({ name: "tie_resolved", parameters: outcome });
+  events.push({ name: "decision_completed", parameters: {
+    ...outcome, decision_seconds: Math.max(0, (Date.now() - group.createdAt) / 1000), winner_vote_count: max,
+  } });
+  return events;
 }
 export function tallyVotes(group: GroupData): Record<string, number> {
   const tally: Record<string, number> = Object.fromEntries(group.candidateIds.map((id) => [id, 0]));
@@ -475,12 +520,51 @@ function prepareNominations(group: GroupData, favorites: string[], selectedResta
   });
 }
 
+function changePreferences(group: GroupData, uid: string, input: PreferenceInput): RoomEvent[] {
+  const previous = { ...requireMember(group, uid) };
+  const readyCount = Object.values(group.preferences).filter((preference) => preference.readyToVote).length;
+  updatePreferences(group, uid, input);
+  const next = group.preferences[uid];
+  const events: RoomEvent[] = [];
+  const sameSelection = (a: string[], b: string[]) => a.length === b.length && a.every((value) => b.includes(value));
+  if (!sameSelection(previous.budgetRanges, next.budgetRanges)) {
+    events.push({ name: "budget_ranges_updated", parameters: { selected_range_count: next.budgetRanges.length } });
+  }
+  if (!sameSelection(previous.dietaryNeeds ?? [], next.dietaryNeeds ?? [])) {
+    events.push({ name: "dietary_needs_updated", parameters: { need_count: next.dietaryNeeds?.length ?? 0 } });
+  }
+  const beforeNames = previous.favorites.map(restaurantNameKey);
+  const afterNames = next.favorites.map(restaurantNameKey);
+  const added = afterNames.filter((name) => !beforeNames.includes(name)).length;
+  const removed = beforeNames.filter((name) => !afterNames.includes(name)).length;
+  if (added) events.push({ name: "restaurant_nominated", parameters: {
+    added_count: added, source: input.restaurants?.some((restaurant) => restaurant.placeId) ? "google_places" : input.restaurants?.length ? "provider" : "typed",
+    dietary_info_found: input.restaurants?.some((restaurant) => restaurant.dietaryChecked === true) ?? false,
+  } });
+  if (removed) events.push({ name: "restaurant_nomination_removed", parameters: { removed_count: removed } });
+  if (input.restaurants?.length) events.push({ name: "restaurant_details_updated",
+    parameters: { updated_count: input.restaurants.length } });
+  if (previous.distanceCapMiles !== next.distanceCapMiles || JSON.stringify(previous.hostLocation) !== JSON.stringify(next.hostLocation)) {
+    events.push({ name: "distance_preferences_updated", parameters: {
+      distance_cap_set: next.distanceCapMiles !== null, coordinates_available: coordinates(next.hostLocation),
+    } });
+  }
+  if (readyCount && Object.values(group.preferences).every((preference) => !preference.readyToVote)) {
+    events.push({ name: "readiness_reset", parameters: { reset_member_count: readyCount, reset_reason: "preferences_changed" } });
+  }
+  return events;
+}
+
 export async function createGroup(input: { groupName?: string; location?: string; tieStrategy?: TieStrategy } = {}) {
   await currentUser();
   const strategy = input.tieStrategy ?? (Math.random() < 0.5 ? "random" : "runoff");
   if (strategy !== "random" && strategy !== "runoff") throw new RoomError("Invalid tie strategy.");
   const group = newGroup(text(input.groupName ?? "Untitled Group", "group name", 100), text(input.location ?? "Unknown", "group location", 500), strategy);
   const ref = await addDoc(collection(db, "rooms"), group);
+  reportRoomEvents(group, ref.id, [
+    { name: "group_created" },
+    { name: "experiment_assigned", parameters: { assignment_source: input.tieStrategy ? "explicit" : "randomized" } },
+  ]);
   return { roomId: ref.id, joinPath: `/room/${ref.id}`, tieStrategy: strategy };
 }
 
@@ -488,9 +572,11 @@ export async function joinGroup(roomId: string, name = "Anonymous", _memberId?: 
   void _memberId;
   const user = await currentUser();
   const ref = roomRef(roomId);
-  return runTransaction(db, async (transaction) => {
+  const result = await runTransaction(db, async (transaction) => {
     const snapshot = await transaction.get(ref);
     const group = groupData(snapshot.data());
+    const returning = Object.hasOwn(group.members, user.uid);
+    const readyCount = Object.values(group.preferences).filter((preference) => preference.readyToVote).length;
     let defaults: PreferenceInput = {};
     if (!Object.hasOwn(group.members, user.uid) && !user.isAnonymous) {
       const profile = await transaction.get(doc(db, "profiles", user.uid));
@@ -499,22 +585,32 @@ export async function joinGroup(roomId: string, name = "Anonymous", _memberId?: 
     if (defaults.favorites) defaults.favorites = prepareNominations(group, defaults.favorites);
     joinMember(group, user.uid, text(name, "member name", 100), defaults);
     transaction.set(ref, group);
-    return { memberId: user.uid, state: roomView(group, roomId, user.uid) };
+    return { memberId: user.uid, state: roomView(group, roomId, user.uid), group, returning, readyCount };
   });
+  const events: RoomEvent[] = [{ name: "group_joined", parameters: {
+    returning_member: result.returning, account_type: user.isAnonymous ? "guest" : "registered",
+  } }];
+  if (!result.returning && result.readyCount) events.push({ name: "readiness_reset",
+    parameters: { reset_member_count: result.readyCount, reset_reason: "member_joined" } });
+  reportRoomEvents(result.group, roomId, events);
+  return { memberId: result.memberId, state: result.state };
 }
 
-async function changeRoom(roomId: string, memberId: string | undefined, change: (group: GroupData, uid: string) => void) {
+async function changeRoom(roomId: string, memberId: string | undefined, change: (group: GroupData, uid: string) => RoomEvent[]) {
   const user = await currentUser();
   if (memberId !== undefined && user.uid !== memberId) throw new RoomError("Rejoin the group with your current account.");
   const ref = roomRef(roomId);
-  return runTransaction(db, async (transaction) => {
+  const result = await runTransaction(db, async (transaction) => {
     const snapshot = await transaction.get(ref);
     const group = groupData(snapshot.data());
     requireMember(group, user.uid);
-    change(group, user.uid);
+    const events = change(group, user.uid);
     transaction.set(ref, group);
-    return { memberId: user.uid, state: roomView(group, roomId, user.uid) };
+    return { memberId: user.uid, state: roomView(group, roomId, user.uid), group, events };
   });
+  // Only the successful transaction attempt reports; retries and room listeners do not.
+  reportRoomEvents(result.group, roomId, result.events);
+  return { memberId: result.memberId, state: result.state };
 }
 
 export function submitPreferences(roomId: string, memberId: string, input: PreferenceInput) {
@@ -522,12 +618,13 @@ export function submitPreferences(roomId: string, memberId: string, input: Prefe
     const next = { ...input };
     if (next.favorites !== undefined) next.favorites = prepareNominations(group, next.favorites, next.restaurants);
     if (next.hostLocation !== undefined) next.hostLocation = locationInput(next.hostLocation);
-    updatePreferences(group, uid, next);
-    if (next.readyToVote !== undefined) markReady(group, uid, next.readyToVote);
+    const events = changePreferences(group, uid, next);
+    if (next.readyToVote !== undefined) events.push(...markReady(group, uid, next.readyToVote));
+    return events;
   });
 }
 export function updateRoomDistance(roomId: string, input: { distanceCapMiles: number | null; hostLocation: HostLocation | null }) {
-  return changeRoom(roomId, undefined, (group, uid) => updatePreferences(group, uid, {
+  return changeRoom(roomId, undefined, (group, uid) => changePreferences(group, uid, {
     distanceCapMiles: distanceCap(input.distanceCapMiles), hostLocation: locationInput(input.hostLocation),
   }));
 }
@@ -543,12 +640,20 @@ export function submitVotes(roomId: string, memberId: string, restaurantIds: str
   return changeRoom(roomId, memberId, (group, uid) => castVote(group, uid, restaurantIds, round, () => random));
 }
 export function removeNomination(roomId: string, memberId: string, name: string) {
-  return changeRoom(roomId, memberId, (group, uid) => updatePreferences(group, uid, {
+  return changeRoom(roomId, memberId, (group, uid) => changePreferences(group, uid, {
     favorites: group.preferences[uid].favorites.filter((favorite) => restaurantNameKey(favorite) !== restaurantNameKey(name)),
   }));
 }
 export function submitResultFeedback(roomId: string, memberId: string, happy: boolean) {
-  return changeRoom(roomId, memberId, (group, uid) => recordFeedback(group, uid, happy));
+  return changeRoom(roomId, memberId, (group, uid) => {
+    const previous = group.feedback[uid];
+    recordFeedback(group, uid, happy);
+    return previous?.happy === happy ? [] : [{ name: "winner_satisfaction_submitted", parameters: {
+      happy, response_changed: Boolean(previous),
+      response_count: Object.keys(group.feedback).length,
+      happy_count: Object.values(group.feedback).filter((response) => response.happy).length,
+    } }];
+  });
 }
 export async function getRoomState(roomId: string): Promise<RoomState | null> {
   const user = await currentUser();

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { placePhotoUrl, priceLevelLabel, type GroupCenter, type PlaceResult } from "../../lib/places";
+import { trackEvent } from "../../lib/analytics";
 
 type Props = {
     center: GroupCenter | null;
@@ -41,6 +42,9 @@ export default function RestaurantSearch({ center, disabled, nominatedPlaceIds, 
         const controller = new AbortController();
         const timer = setTimeout(async () => {
             setLoading(true);
+            const startedAt = Date.now();
+            const searchContext = { search_mode: trimmed ? "text" : "nearby" };
+            void trackEvent("restaurant_search_started", searchContext);
             try {
                 const res = await fetch("/api/places/search", {
                     method: "POST",
@@ -49,14 +53,23 @@ export default function RestaurantSearch({ center, disabled, nominatedPlaceIds, 
                     signal: controller.signal,
                 });
                 if (res.status === 503) {
+                    void trackEvent("restaurant_search_unavailable", searchContext);
                     setUnavailable(true);
                     return;
                 }
                 const data = await res.json();
+                if (controller.signal.aborted) return;
+                void trackEvent(res.ok ? "restaurant_search_completed" : "restaurant_search_failed", {
+                    ...searchContext, duration_ms: Date.now() - startedAt, status_code: res.status,
+                    ...(res.ok ? { result_count: (data.places ?? []).length } : {}),
+                });
                 setResults(res.ok ? data.places ?? [] : []);
                 setError(res.ok ? "" : "Search isn't working right now. Try again or add the name below.");
             } catch {
-                // aborted by a newer search, or offline
+                if (!controller.signal.aborted) {
+                    void trackEvent("restaurant_search_failed", { ...searchContext, duration_ms: Date.now() - startedAt, error_kind: "network_or_response" });
+                    setError("Search isn't working right now. Try again or add the name below.");
+                }
             } finally {
                 if (!controller.signal.aborted) setLoading(false);
             }

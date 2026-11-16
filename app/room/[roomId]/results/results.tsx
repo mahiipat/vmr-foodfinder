@@ -20,7 +20,7 @@ export default function Results({ roomId }: { roomId: string }) {
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackError, setFeedbackError] = useState("");
 
-  useEffect(() => { void trackScreen("results"); }, []);
+  useEffect(() => trackScreen("results"), [roomId]);
   useEffect(() => {
     const stop = subscribeRoomState(roomId, (next) => {
       setState(next);
@@ -47,7 +47,6 @@ export default function Results({ roomId }: { roomId: string }) {
     setFeedbackError("");
     try {
       await submitResultFeedback(roomId, memberId, happy);
-      void trackEvent("winner_satisfaction_submitted", { happy });
     } catch (err) {
       setFeedbackError(userErrorMessage(err, "Could not save your response."));
     } finally {

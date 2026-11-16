@@ -15,7 +15,7 @@ import {
   type RoomState,
 } from "../../../../backend/AppBackend";
 import { getMemberSession } from "../../../../lib/foodfinder";
-import { trackEvent, trackScreen } from "../../../../lib/analytics";
+import { trackScreen } from "../../../../lib/analytics";
 import { lookupDietary, type DietaryTag } from "../../../../lib/dietary";
 import { placeToRestaurant, type PlaceResult } from "../../../../lib/places";
 import LocationDistance from "../locationDistance";
@@ -37,9 +37,7 @@ export default function Nominations({ roomId }: { roomId: string }) {
   const [searchRequest, setSearchRequest] = useState<{ query: string; key: number } | null>(null);
   const center = useGroupCenter(state?.room, state?.hostLocation);
 
-  useEffect(() => {
-    void trackScreen("nominations");
-  }, []);
+  useEffect(() => trackScreen("nominations"), [roomId]);
 
   useEffect(() => {
     const stop = subscribeRoomState(roomId, (nextState) => {
@@ -74,7 +72,6 @@ export default function Nominations({ roomId }: { roomId: string }) {
         budgetRanges: nextRanges.length ? nextRanges : [...ALL_BUDGET_RANGES],
       });
       setState(result.state);
-      void trackEvent("budget_ranges_updated", { selected_range_count: nextRanges.length });
     } catch (error) {
       setError(userErrorMessage(error, "Unable to save budget ranges. Please try again."));
     }
@@ -96,7 +93,6 @@ export default function Nominations({ roomId }: { roomId: string }) {
     try {
       const result = await submitPreferences(roomId, memberId, { dietaryNeeds: nextNeeds });
       setState(result.state);
-      void trackEvent("dietary_needs_updated", { need_count: nextNeeds.length });
     } catch (error) {
       setError(userErrorMessage(error, "Unable to save dietary needs. Please try again."));
     }
@@ -105,16 +101,12 @@ export default function Nominations({ roomId }: { roomId: string }) {
   // picked from Google Places search; looks up Yelp dietary info before saving
   async function addPlace(place: PlaceResult) {
     const dietary = await lookupDietary(place);
-    const added = await addRestaurant(place.name, placeToRestaurant(place, dietary));
-    if (added) {
-      void trackEvent("restaurant_nominated", { source: "google_places", dietary_info_found: dietary.checked });
-    }
+    await addRestaurant(place.name, placeToRestaurant(place, dietary));
   }
 
   // typed name, used when search is unavailable or can't find the place
   async function addTypedName(restaurantName: string) {
-    const added = await addRestaurant(restaurantName);
-    if (added) void trackEvent("restaurant_nominated", { source: "typed" });
+    await addRestaurant(restaurantName);
   }
 
   async function addRestaurant(nameInput: string, restaurant?: Restaurant): Promise<boolean> {
@@ -152,7 +144,6 @@ export default function Nominations({ roomId }: { roomId: string }) {
     try {
       const result = await removeNomination(roomId, memberId, restaurantName);
       setState(result.state);
-      void trackEvent("restaurant_nomination_removed");
     } catch (error) {
       console.error(error);
       setError("Couldn't remove the nomination. Please try again.");
@@ -168,7 +159,6 @@ export default function Nominations({ roomId }: { roomId: string }) {
     try {
       const result = await markMemberReadyForVoting(roomId, memberId, true);
       setState(result.state);
-      void trackEvent("ready_to_vote");
     } catch (error) {
       console.error(error);
       setError("Couldn't mark you as ready. Please try again.");

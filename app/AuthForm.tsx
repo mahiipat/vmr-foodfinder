@@ -1,8 +1,9 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { authErrorMessage, logIn, signUp } from "../backend/AppBackend";
+import { trackScreen } from "../lib/analytics";
 
 export default function AuthForm({
   mode,
@@ -16,6 +17,7 @@ export default function AuthForm({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  useEffect(() => trackScreen(mode), [mode]);
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();

@@ -7,6 +7,9 @@ type User = { uid: string; isAnonymous: boolean; displayName: string; getIdToken
 
 export function backendFixture(anonymous = true) {
   const store = new Map<string, unknown>();
+  const analyticsEvents: Array<{ name: string; parameters: Record<string, string | number | boolean> }> = [];
+  let transactionAttempts = 1;
+  let transactionFailure: Error | null = null;
   const watchers = new Map<string, Set<(value: ReturnType<typeof snapshot>) => void>>();
   let sequence = 0;
   let stopCount = 0;
@@ -30,8 +33,12 @@ export function backendFixture(anonymous = true) {
       const id = `room-${++sequence}`; set(`${path}/${id}`, value); return { id };
     },
     runTransaction: async (_db: unknown, operation: (transaction: { get: (path: string) => Promise<ReturnType<typeof snapshot>>; set: (path: string, value: unknown) => void }) => unknown) => {
+      for (let attempt = 1; attempt < transactionAttempts; attempt++) {
+        await operation({ get: firestore.getDoc, set: () => {} });
+      }
       const writes = new Map<string, unknown>();
       const result = await operation({ get: firestore.getDoc, set: (path, value) => { writes.set(path, structuredClone(value)); } });
+      if (transactionFailure) throw transactionFailure;
       for (const [path, value] of writes) set(path, value);
       return result;
     },
@@ -69,9 +76,14 @@ export function backendFixture(anonymous = true) {
   execute((id: string) => {
     if (id === "firebase/auth") return firebaseAuth;
     if (id === "firebase/firestore") return firestore;
-    if (id === "./firebase") return { auth, db: {} };
+    if (id === "./firebase") return { auth, db: {},
+      ANALYTICS_STUDY_STARTED_AT: Date.parse("2026-11-16T01:53:20.605Z"),
+      trackEvent: async (name: string, parameters: Record<string, string | number | boolean>) => { analyticsEvents.push({ name, parameters }); },
+    };
     throw new Error(`Unexpected import: ${id}`);
   }, exports);
-  return { backend: exports as Backend, auth, user, store, set, source, firebaseAuth, emitAuth,
+  return { backend: exports as Backend, auth, user, store, set, source, firebaseAuth, emitAuth, analyticsEvents,
+    retryTransactions: (attempts: number) => { transactionAttempts = attempts; },
+    failTransactions: (error: Error | null) => { transactionFailure = error; },
     counts: () => ({ stopCount, listenerCount }) };
 }

@@ -43,9 +43,7 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
         return () => { cancelled = true; };
     }, [account, roomId]);
 
-    useEffect(() => {
-        void trackScreen("group_room");
-    }, []);
+    useEffect(() => trackScreen("group_room"), [roomId]);
 
     useEffect(() => {
         const stop = subscribeRoomState(roomId, (state) => {
@@ -66,7 +64,6 @@ export default function GroupRoom({ roomId }: { roomId: string }) {
             setMemberSession(roomId, { memberId, name: trimmed });
             setCurrentMember(trimmed);
             setName(null);
-            void trackEvent("group_joined", { returning_member: Boolean(existing?.memberId) });
         } catch (error) {
             setError(userErrorMessage(error, "Unable to join group. Please try again."));
         } finally { setSaving(false); }

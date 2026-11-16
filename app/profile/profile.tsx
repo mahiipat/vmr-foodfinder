@@ -6,6 +6,7 @@ import { onAuthStateChanged, signOut, updateProfile, type User } from "firebase/
 import { auth } from "../../backend/firebase";
 import { ALL_BUDGET_RANGES, budgetRangeLabels, userErrorMessage, type BudgetRange } from "../../backend/AppBackend";
 import { getAccountPreferences, saveAccountPreferences } from "../../lib/accountPreferences";
+import { trackScreen } from "../../lib/analytics";
 
 export default function Profile() {
   const router = useRouter();
@@ -19,6 +20,7 @@ export default function Profile() {
   const [distanceEnabled, setDistanceEnabled] = useState(false);
   const [distance, setDistance] = useState("5");
   const [prefsBusy, setPrefsBusy] = useState(false);
+  useEffect(() => trackScreen("profile"), []);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (currentUser) => {

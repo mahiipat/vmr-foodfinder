@@ -23,7 +23,8 @@ function client() {
   runInThisContext(`(function(require, exports) { ${compiled.outputText}\n})`)((id) => {
     if (id === "firebase/auth") return firebaseAuth;
     if (id === "firebase/firestore") return firestore;
-    if (id === "./firebase") return { auth, db };
+    if (id === "./firebase") return { auth, db, trackEvent: async () => {},
+      ANALYTICS_STUDY_STARTED_AT: Date.parse("2026-11-16T01:53:20.605Z") };
     throw new Error(`Unexpected import: ${id}`);
   }, backend);
   return { app, auth, db, backend };

@@ -23,9 +23,7 @@ export default function Home() {
         catch (error) { setError(userErrorMessage(error, "Unable to log out. Please try again.")); }
     }
 
-    useEffect(() => {
-        void trackScreen("home");
-    }, []);
+    useEffect(() => trackScreen("home"), []);
 
     async function useCurrentLocation() {
         if (!navigator.geolocation) {
@@ -72,7 +70,6 @@ export default function Home() {
         try {
             void trackEvent("group_creation_started");
             const { roomId } = await createGroupRecord({ groupName: groupName.trim(), location: groupLocation.trim() });
-            void trackEvent("group_created");
             router.push(`/room/${roomId}`);
         } catch (error) {
             setError(userErrorMessage(error, "Unable to create group. Please try again."));

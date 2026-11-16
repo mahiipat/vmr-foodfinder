@@ -22,9 +22,7 @@ export default function Voting({ roomId }: { roomId: string }) {
     const [error, setError] = useState("");
     const [saving, setSaving] = useState(false);
 
-    useEffect(() => {
-        void trackScreen("voting");
-    }, []);
+    useEffect(() => trackScreen("voting"), [roomId]);
 
     useEffect(() => {
         hydratedRound.current = null;
@@ -48,6 +46,8 @@ export default function Voting({ roomId }: { roomId: string }) {
             : state?.phase === "runoff" ? [id] : [...previous, id]);
         void trackEvent("vote_selection_changed", {
             selected_restaurant_id: id,
+            tie_strategy: state?.tieStrategy ?? "unknown",
+            round: state?.round ?? 0,
             action: selected.includes(id) ? "removed" : "added",
         });
     }
@@ -59,7 +59,6 @@ export default function Voting({ roomId }: { roomId: string }) {
         try {
             const result = await submitVotes(roomId, memberId, selected, state.round);
             setState(result.state);
-            void trackEvent("votes_submitted", { selected_restaurant_count: selected.length });
             if (result.state.phase !== "runoff" || state.phase === "runoff") router.push(`/room/${roomId}/results`);
             else { setSelected([]); hydratedRound.current = result.state.round; }
         } catch (error) {
